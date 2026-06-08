@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+dist/
+*.log
+.env*
+!.env.example
+
+# Local Netlify folder
+.netlify
+*.pid

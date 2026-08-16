@@ -1,5 +1,7 @@
-﻿import type { Config, Context } from "@netlify/functions";
+import type { Config, Context } from "@netlify/functions";
+import { AuthError, hashPassword, requireSession } from "./_shared/auth";
 import { getNeonSql, jsonResponse } from "./_shared/neon";
+import { notifyStudents } from "./_shared/push";
 
 function dateOnly(value: unknown) {
   if (!value) return "";
@@ -13,6 +15,7 @@ type MutationBody = {
     | "room"
     | "team"
     | "financialEntry"
+    | "financialEntryBatch"
     | "financialCategory"
     | "attendanceRecord"
     | "attendanceBatch"
@@ -23,6 +26,7 @@ type MutationBody = {
     | "portalContent"
     | "libraryItem"
     | "ministryItem"
+    | "ministryChoice"
     | "interaction";
   action: "create" | "update" | "delete" | "replaceList" | "upsert";
   payload?: any;
@@ -43,7 +47,7 @@ function mapRoom(row: any) {
 }
 
 function mapTeam(row: any) {
-  return { id: Number(row.id), name: row.name ?? "", username: row.username ?? "", email: row.email ?? "", phone: row.phone ?? "", password: row.password ?? "", role: row.role ?? "teacher", room: row.room ?? "", avatar: row.avatar ?? "", photo: row.photo || undefined };
+  return { id: Number(row.id), name: row.name ?? "", username: row.username ?? "", email: row.email ?? "", phone: row.phone ?? "", role: row.role ?? "teacher", room: row.room ?? "", avatar: row.avatar ?? "", photo: row.photo || undefined };
 }
 
 function mapFinancialEntry(row: any) {
@@ -71,7 +75,7 @@ function mapLibrary(row: any) {
 }
 
 function mapMinistry(row: any) {
-  return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), paymentKey: row.payment_key ?? "", active: Boolean(row.active), createdAt: row.created_at ?? "" };
+  return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), paymentKey: row.payment_key ?? "", imageUrl: row.image_url ?? "", active: Boolean(row.active), createdAt: row.created_at ?? "" };
 }
 
 function mapInteraction(row: any) {
@@ -119,12 +123,17 @@ async function mutateTeam(sql: ReturnType<typeof getNeonSql>, body: MutationBody
     return { deleted: true, id: body.id };
   }
   const item = ensurePayload(body);
+  const password = String(item.password ?? "").trim();
   if (body.action === "create") {
-    const rows = await sql`insert into team_members (name, username, email, phone, password, role, room, avatar, photo) values (${item.name}, ${item.username}, ${item.email ?? ""}, ${item.phone ?? ""}, ${item.password}, ${item.role}, ${item.room ?? ""}, ${item.avatar ?? ""}, ${item.photo ?? ""}) returning *`;
+    if (password.length < 6) throw new Error("A senha precisa ter pelo menos 6 caracteres.");
+    const rows = await sql`insert into team_members (name, username, email, phone, password, role, room, avatar, photo) values (${item.name}, ${item.username}, ${item.email ?? ""}, ${item.phone ?? ""}, ${hashPassword(password)}, ${item.role}, ${item.room ?? ""}, ${item.avatar ?? ""}, ${item.photo ?? ""}) returning *`;
     return mapTeam(rows[0]);
   }
   if (!body.id) throw new Error("ID do acesso não informado.");
-  const rows = await sql`update team_members set name = ${item.name}, username = ${item.username}, email = ${item.email ?? ""}, phone = ${item.phone ?? ""}, password = ${item.password}, role = ${item.role}, room = ${item.room ?? ""}, avatar = ${item.avatar ?? ""}, photo = ${item.photo ?? ""}, updated_at = now() where id = ${body.id} returning *`;
+  const current = await sql`select password from team_members where id = ${body.id} limit 1`;
+  if (!current.length) throw new Error("Acesso não encontrado.");
+  const nextPassword = password ? hashPassword(password) : String(current[0].password ?? "");
+  const rows = await sql`update team_members set name = ${item.name}, username = ${item.username}, email = ${item.email ?? ""}, phone = ${item.phone ?? ""}, password = ${nextPassword}, role = ${item.role}, room = ${item.room ?? ""}, avatar = ${item.avatar ?? ""}, photo = ${item.photo ?? ""}, updated_at = now() where id = ${body.id} returning *`;
   return mapTeam(rows[0]);
 }
 
@@ -142,6 +151,26 @@ async function mutateFinancialEntry(sql: ReturnType<typeof getNeonSql>, body: Mu
   if (!body.id) throw new Error("ID do lançamento não informado.");
   const rows = await sql`update financial_entries set type = ${item.type}, title = ${item.title}, category = ${item.category}, value = ${item.value ?? 0}, date = ${item.date}, month = ${item.month}, year = ${item.year}, updated_at = now() where id = ${body.id} returning *`;
   return mapFinancialEntry(rows[0]);
+}
+
+async function mutateFinancialEntryBatch(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
+  const item = ensurePayload(body);
+  const entries = Array.isArray(item.entries) ? item.entries.slice(0, 24) : [];
+  if (!entries.length) throw new Error("Nenhuma parcela foi informada.");
+
+  const saved: any[] = [];
+  try {
+    for (const entry of entries) {
+      const rows = await sql`insert into financial_entries (type, title, category, value, date, month, year) values (${entry.type}, ${entry.title}, ${entry.category}, ${entry.value ?? 0}, ${entry.date}, ${entry.month}, ${entry.year}) returning *`;
+      saved.push(rows[0]);
+    }
+    return saved.map(mapFinancialEntry);
+  } catch (error) {
+    for (const entry of saved) {
+      await sql`delete from financial_entries where id = ${entry.id}`;
+    }
+    throw error;
+  }
 }
 
 async function mutateFinancialCategory(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
@@ -246,11 +275,15 @@ async function mutatePortalContent(sql: ReturnType<typeof getNeonSql>, body: Mut
   const item = ensurePayload(body);
   if (body.action === "create") {
     const rows = await sql`insert into student_portal_contents (type, title, body, media_url, room, author_name, active, published_at) values (${item.type}, ${item.title}, ${item.body ?? ""}, ${item.mediaUrl ?? ""}, ${item.room ?? "Geral"}, ${item.authorName ?? ""}, ${item.active ?? true}, ${item.publishedAt ?? new Date().toISOString()}) returning *`;
-    return mapContent(rows[0]);
+    const saved = mapContent(rows[0]);
+    const pushDelivery = saved.active ? await notifyStudents(sql, { room: saved.room, title: saved.title, message: saved.body || "Novo conteúdo publicado para sua turma.", type: saved.type, link: "/aluno?section=contents" }) : { saved: 0, sent: 0 };
+    return { ...saved, pushDelivery };
   }
   if (!body.id) throw new Error("ID do conteúdo não informado.");
   const rows = await sql`update student_portal_contents set type = ${item.type}, title = ${item.title}, body = ${item.body ?? ""}, media_url = ${item.mediaUrl ?? ""}, room = ${item.room ?? "Geral"}, author_name = ${item.authorName ?? ""}, active = ${item.active ?? true}, published_at = ${item.publishedAt ?? new Date().toISOString()}, updated_at = now() where id = ${body.id} returning *`;
-  return mapContent(rows[0]);
+  const saved = mapContent(rows[0]);
+  const pushDelivery = saved.active ? await notifyStudents(sql, { room: saved.room, title: saved.title, message: saved.body || "Conteúdo atualizado para sua turma.", type: saved.type, link: "/aluno?section=contents" }) : { saved: 0, sent: 0 };
+  return { ...saved, pushDelivery };
 }
 
 async function mutateLibraryItem(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
@@ -270,6 +303,7 @@ async function mutateLibraryItem(sql: ReturnType<typeof getNeonSql>, body: Mutat
 }
 
 async function mutateMinistryItem(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
+  await sql`alter table student_ministry_items add column if not exists image_url text default ''`;
   if (body.action === "delete") {
     if (!body.id) throw new Error("ID do item não informado.");
     await sql`delete from student_ministry_items where id = ${body.id}`;
@@ -277,14 +311,83 @@ async function mutateMinistryItem(sql: ReturnType<typeof getNeonSql>, body: Muta
   }
   const item = ensurePayload(body);
   if (body.action === "create") {
-    const rows = await sql`insert into student_ministry_items (title, description, price, payment_key, active) values (${item.title}, ${item.description ?? ""}, ${item.price ?? 0}, ${item.paymentKey ?? ""}, ${item.active ?? true}) returning *`;
+    const rows = await sql`insert into student_ministry_items (title, description, price, payment_key, image_url, active) values (${item.title}, ${item.description ?? ""}, ${item.price ?? 0}, ${item.paymentKey ?? ""}, ${item.imageUrl ?? ""}, ${item.active ?? true}) returning *`;
     return mapMinistry(rows[0]);
   }
   if (!body.id) throw new Error("ID do item não informado.");
-  const rows = await sql`update student_ministry_items set title = ${item.title}, description = ${item.description ?? ""}, price = ${item.price ?? 0}, payment_key = ${item.paymentKey ?? ""}, active = ${item.active ?? true}, updated_at = now() where id = ${body.id} returning *`;
+  const rows = await sql`update student_ministry_items set title = ${item.title}, description = ${item.description ?? ""}, price = ${item.price ?? 0}, payment_key = ${item.paymentKey ?? ""}, image_url = ${item.imageUrl ?? ""}, active = ${item.active ?? true}, updated_at = now() where id = ${body.id} returning *`;
   return mapMinistry(rows[0]);
 }
 
+function fortalezaDate(value = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Fortaleza", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(value);
+  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
+function nextSundayDate(value = new Date()) {
+  const local = fortalezaDate(value);
+  const date = new Date(`${local}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + ((7 - date.getUTCDay()) % 7 || 7));
+  return date.toISOString().slice(0, 10);
+}
+
+async function mutateMinistryChoice(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
+  const item = ensurePayload(body);
+  const rawItemIds = Array.isArray(item.itemIds) ? item.itemIds : [item.itemId];
+  const itemIds = Array.from(new Set(rawItemIds.map((value: unknown) => Number(value)).filter((id: number) => Number.isInteger(id) && id > 0))).slice(0, 12);
+  const studentId = Number(item.studentId);
+  const method = item.method === "pix" || item.method === "cash" || item.method === "take" ? item.method : "";
+  if (!itemIds.length || !Number.isInteger(studentId) || studentId <= 0 || !method) throw new Error("Dados da escolha inválidos.");
+
+  const [selectedItems, selectedStudent] = await Promise.all([
+    sql`select id from student_ministry_items where id = any(${itemIds}) and active = true`,
+    sql`select id, name from students where id = ${studentId} limit 1`
+  ]);
+  if (selectedItems.length !== itemIds.length) throw new Error("Um dos produtos não está disponível.");
+  if (!selectedStudent.length) throw new Error("Aluno não encontrado.");
+
+  await sql`insert into app_settings (key, value, updated_at) values ('general', '{}'::jsonb, now()) on conflict (key) do nothing`;
+  const today = fortalezaDate();
+  const entry = { releaseDate: nextSundayDate(), studentName: String(selectedStudent[0].name ?? "Aluno"), method, chosenAt: new Date().toISOString() };
+  const newUnavailableItems = JSON.stringify(Object.fromEntries(itemIds.map((id) => [String(id), entry])));
+  const rows = await sql`
+    with current_settings as (
+      select value,
+        case jsonb_typeof(value -> 'ministryUnavailableItems')
+          when 'string' then coalesce((value ->> 'ministryUnavailableItems')::jsonb, '{}'::jsonb)
+          when 'object' then value -> 'ministryUnavailableItems'
+          else '{}'::jsonb
+        end as unavailable_items
+      from app_settings
+      where key = 'general'
+      for update
+    )
+    update app_settings as settings
+    set value = jsonb_set(
+      settings.value,
+      array['ministryUnavailableItems'],
+      to_jsonb((current_settings.unavailable_items || ${newUnavailableItems}::jsonb)::text),
+      true
+    ), updated_at = now()
+    from current_settings
+    where settings.key = 'general'
+      and not exists (
+        select 1 from jsonb_object_keys(${newUnavailableItems}::jsonb) as selected(id)
+        where coalesce(
+          case jsonb_typeof(current_settings.unavailable_items -> selected.id)
+            when 'object' then current_settings.unavailable_items -> selected.id ->> 'releaseDate'
+            when 'string' then current_settings.unavailable_items ->> selected.id
+            else ''
+          end,
+          ''
+        ) > ${today}
+      )
+    returning settings.value ->> 'ministryUnavailableItems' as ministry_unavailable_items
+  `;
+  if (!rows.length) throw new AuthError("Um dos produtos já foi escolhido e ficará indisponível até domingo.", 409);
+  return { ministryUnavailableItems: String(rows[0].ministry_unavailable_items ?? "{}") };
+}
 async function mutateInteraction(sql: ReturnType<typeof getNeonSql>, body: MutationBody) {
   const item = ensurePayload(body);
   const table = item.table === "student_prayer_requests" ? "student_prayer_requests" : "student_questions";
@@ -295,22 +398,53 @@ async function mutateInteraction(sql: ReturnType<typeof getNeonSql>, body: Mutat
     return mapInteraction(rows[0]);
   }
   if (!body.id) throw new Error("ID da interação não informado.");
+  const previousRows = table === "student_prayer_requests"
+    ? await sql`select response from student_prayer_requests where id = ${body.id} limit 1`
+    : await sql`select response from student_questions where id = ${body.id} limit 1`;
   const rows = table === "student_prayer_requests"
     ? await sql`update student_prayer_requests set status = ${item.status ?? "novo"}, response = ${item.response ?? ""}, updated_at = now() where id = ${body.id} returning *`
     : await sql`update student_questions set status = ${item.status ?? "novo"}, response = ${item.response ?? ""}, updated_at = now() where id = ${body.id} returning *`;
-  return mapInteraction(rows[0]);
+  const updated = mapInteraction(rows[0]);
+  const responseChanged = updated.response && updated.response !== String(previousRows[0]?.response ?? "");
+  if (updated.studentId && responseChanged) {
+    await notifyStudents(sql, { studentId: updated.studentId, title: table === "student_prayer_requests" ? "Novo acompanhamento do professor" : "Nova resposta do professor", message: updated.response, type: "comentario", link: "/aluno?section=talk" });
+  }
+  return updated;
 }
 
 export default async (req: Request, _context: Context) => {
   if (req.method !== "POST") return jsonResponse({ message: "Método não permitido." }, { status: 405 });
   try {
     const body = (await req.json()) as MutationBody;
+    let session;
+    try {
+      session = requireSession(req);
+    } catch (error) {
+      const publicStudentAction = body.entity === "student" && (body.action === "create" || body.action === "update");
+      const publicInteraction = body.entity === "interaction" && body.action === "create";
+      const publicMinistryChoice = body.entity === "ministryChoice" && body.action === "create";
+      if (!publicStudentAction && !publicInteraction && !publicMinistryChoice) throw error;
+    }
+    if (session?.role === "student") {
+      const choiceStudentId = Number((body.payload as { studentId?: unknown } | undefined)?.studentId);
+      const allowed = (body.entity === "student" && body.action === "update" && Number(body.id) === session.sub) || (body.entity === "interaction" && body.action === "create") || (body.entity === "ministryChoice" && body.action === "create" && choiceStudentId === session.sub);
+      if (!allowed) throw new AuthError("Ação não permitida para o aluno.", 403);
+    }
+    if (session?.role === "teacher") {
+      const adminOnly = ["team", "financialEntry", "financialEntryBatch", "financialCategory", "settings", "libraryItem", "ministryItem", "schedule"];
+      if (adminOnly.includes(body.entity)) throw new AuthError("Ação restrita ao administrador.", 403);
+      const item = body.payload as { room?: string; name?: string; records?: Array<{ room?: string }> } | undefined;
+      const claimedRoom = String(session.room ?? "").trim().toLowerCase();
+      const requestedRooms = item?.records?.map((record) => record.room) ?? [item?.room ?? (body.entity === "room" ? item?.name : "")];
+      if (requestedRooms.some((room) => room && String(room).trim().toLowerCase() !== claimedRoom)) throw new AuthError("Você só pode alterar dados da sua sala.", 403);
+    }
     const sql = getNeonSql();
     const result =
       body.entity === "student" ? await mutateStudent(sql, body) :
       body.entity === "room" ? await mutateRoom(sql, body) :
       body.entity === "team" ? await mutateTeam(sql, body) :
       body.entity === "financialEntry" ? await mutateFinancialEntry(sql, body) :
+      body.entity === "financialEntryBatch" ? await mutateFinancialEntryBatch(sql, body) :
       body.entity === "financialCategory" ? await mutateFinancialCategory(sql, body) :
       body.entity === "attendanceRecord" ? await mutateAttendanceRecord(sql, body) :
       body.entity === "attendanceBatch" ? await mutateAttendanceBatch(sql, body) :
@@ -321,10 +455,11 @@ export default async (req: Request, _context: Context) => {
       body.entity === "portalContent" ? await mutatePortalContent(sql, body) :
       body.entity === "libraryItem" ? await mutateLibraryItem(sql, body) :
       body.entity === "ministryItem" ? await mutateMinistryItem(sql, body) :
+      body.entity === "ministryChoice" ? await mutateMinistryChoice(sql, body) :
       await mutateInteraction(sql, body);
     return jsonResponse({ ok: true, data: result });
   } catch (error) {
-    return jsonResponse({ ok: false, message: error instanceof Error ? error.message : "Erro ao salvar no Neon." }, { status: 500 });
+    return jsonResponse({ ok: false, message: error instanceof Error ? error.message : "Erro ao salvar no Neon." }, { status: error instanceof AuthError ? error.status : 500 });
   }
 };
 

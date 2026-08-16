@@ -1,0 +1,19 @@
+{
+  "id": "/aluno",
+  "name": "EBR Aluno",
+  "short_name": "EBR Aluno",
+  "description": "Portal do aluno da Escola Bíblica Resgatai",
+  "start_url": "/aluno",
+  "scope": "/aluno",
+  "display": "standalone",
+  "background_color": "#F8FAFC",
+  "theme_color": "#1E3A5F",
+  "icons": [
+    {
+      "src": "/ebr-logo.jpg",
+      "sizes": "any",
+      "type": "image/jpeg",
+      "purpose": "any maskable"
+    }
+  ]
+}

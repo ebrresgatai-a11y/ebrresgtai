@@ -1,9 +1,10 @@
-﻿"use client";
+"use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BookOpenCheck, Camera, Check, DollarSign, ExternalLink, FileText, MessageCircle, MoreHorizontal, Search, Send, Sparkles, Trash2, Upload, UserRoundPlus } from "lucide-react";
+import { Bell, BookOpenCheck, Camera, Check, DollarSign, ExternalLink, FileText, MessageCircle, MoreHorizontal, Search, Send, Sparkles, Trash2, Upload, UserRoundPlus } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { fetchNeonJson, isNeonProvider } from "@/lib/data-provider";
+import { listenForForegroundPush, registerStudentPushToken } from "@/lib/firebase-client";
 
 type Student = {
   id: number;
@@ -42,9 +43,17 @@ type MinistryItem = {
   description: string;
   price: number;
   paymentKey: string;
+  imageUrl: string;
 };
 
-type MinistryUnavailableMap = Record<string, string>;
+type MinistryUnavailableEntry = {
+  releaseDate: string;
+  studentName?: string;
+  method?: string;
+  chosenAt?: string;
+};
+
+type MinistryUnavailableMap = Record<string, MinistryUnavailableEntry>;
 
 type StudentInteraction = {
   id: number;
@@ -52,6 +61,19 @@ type StudentInteraction = {
   status: string;
   response: string;
   createdAt: string;
+};
+
+type InternalNotification = {
+  id: number;
+  studentId: number;
+  roomId?: number;
+  title: string;
+  message: string;
+  type: string;
+  link: string;
+  read: boolean;
+  createdAt: string;
+  readAt?: string;
 };
 
 type PaymentTarget = {
@@ -69,6 +91,8 @@ async function neonMutate<T>(entity: string, action: string, payload?: unknown, 
   });
   return result.data;
 }
+
+const EBR_HELP_PIX_KEY = "ebrresgatai@gmail.com";
 
 const typeLabels = {
   video: "Aulas em vídeo",
@@ -135,22 +159,48 @@ function isRecentInteraction(item: StudentInteraction) {
 function parseMinistryUnavailableItems(value?: string): MinistryUnavailableMap {
   try {
     const parsed = JSON.parse(value || "{}");
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as MinistryUnavailableMap : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.entries(parsed as Record<string, unknown>).reduce<MinistryUnavailableMap>((acc, [key, raw]) => {
+      if (typeof raw === "string") {
+        acc[key] = { releaseDate: raw };
+        return acc;
+      }
+      if (raw && typeof raw === "object") {
+        const entry = raw as Record<string, unknown>;
+        const releaseDate = String(entry.releaseDate || entry.until || entry.date || "");
+        if (releaseDate) {
+          acc[key] = {
+            releaseDate,
+            studentName: typeof entry.studentName === "string" ? entry.studentName : undefined,
+            method: typeof entry.method === "string" ? entry.method : undefined,
+            chosenAt: typeof entry.chosenAt === "string" ? entry.chosenAt : undefined
+          };
+        }
+      }
+      return acc;
+    }, {});
   } catch {
     return {};
   }
 }
 
-function addDaysToInputDate(value: string | undefined, days: number) {
-  const source = /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? value! : new Date().toISOString().slice(0, 10);
-  const date = new Date(source + "T00:00:00");
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+function toLocalInputDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return year + "-" + month + "-" + day;
 }
 
-function isDateBeforeToday(value?: string) {
-  if (!value) return true;
-  return value < new Date().toISOString().slice(0, 10);
+function getTodayInputDate() {
+  return toLocalInputDate(new Date());
+}
+
+function getNextSundayInputDate(reference = new Date()) {
+  const date = new Date(reference);
+  date.setHours(0, 0, 0, 0);
+  const daysUntilSunday = (7 - date.getDay()) % 7 || 7;
+  date.setDate(date.getDate() + daysUntilSunday);
+  return toLocalInputDate(date);
 }
 
 function whatsappTarget(value: string) {
@@ -209,7 +259,8 @@ function fromDbMinistry(row: any): MinistryItem {
     title: row.title ?? "",
     description: row.description ?? "",
     price: Number(row.price ?? 0),
-    paymentKey: row.payment_key ?? ""
+    paymentKey: row.payment_key ?? "",
+    imageUrl: row.image_url ?? ""
   };
 }
 
@@ -223,9 +274,64 @@ function fromDbInteraction(row: any): StudentInteraction {
   };
 }
 
-function StudentAvatar({ student }: { student: Student }) {
-  if (student.photo) return <img src={student.photo} alt="" className="h-11 w-11 rounded-full object-cover ring-2 ring-white/70 sm:h-16 sm:w-16 sm:ring-4" />;
-  return <div className="grid h-11 w-11 place-items-center rounded-full bg-brand-blue text-sm font-extrabold text-white ring-2 ring-white/70 sm:h-16 sm:w-16 sm:text-lg sm:ring-4">{student.avatar}</div>;
+function StudentAvatar({ student, large = false }: { student: Student; large?: boolean }) {
+  const sizeClass = large ? "h-20 w-20 text-xl ring-4" : "h-16 w-16 text-lg ring-2 sm:ring-4";
+  if (student.photo) return <img src={student.photo} alt={`Foto de ${student.name}`} className={`${sizeClass} shrink-0 rounded-full object-cover object-center ring-white/70`} />;
+  return <div className={`grid ${sizeClass} shrink-0 place-items-center rounded-full bg-brand-blue font-extrabold text-white ring-white/70`}>{student.avatar}</div>;
+}
+
+function isImageMediaUrl(value: string) {
+  return value.startsWith("data:image/") || /\.(?:avif|bmp|gif|jpe?g|png|webp)(?:[?#].*)?$/i.test(value);
+}
+
+function isPdfMediaUrl(value: string) {
+  return value.startsWith("data:application/pdf") || /\.pdf(?:[?#].*)?$/i.test(value);
+}
+
+function openPdfMediaUrl(value: string, title: string) {
+  if (typeof window === "undefined") return;
+  if (!value.startsWith("data:application/pdf")) {
+    window.open(value, "_blank", "noopener,noreferrer");
+    return;
+  }
+
+  const [header, base64 = ""] = value.split(",");
+  const mime = header.match(/^data:([^;]+)/)?.[1] || "application/pdf";
+  const binary = window.atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
+  if (!opened) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${title || "material-ebr"}.pdf`;
+    link.click();
+  }
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function MediaAttachment({ item, compact = false }: { item: PortalContent; compact?: boolean }) {
+  if (!item.mediaUrl) return null;
+  if (isImageMediaUrl(item.mediaUrl)) {
+    return (
+      <a href={item.mediaUrl} target="_blank" rel="noreferrer" className={`${compact ? "mt-2 rounded-xl" : "mt-3 rounded-2xl"} block overflow-hidden bg-slate-100 dark:bg-slate-800`}>
+        <img src={item.mediaUrl} alt={item.title} className={`${compact ? "max-h-52" : "max-h-96"} w-full object-contain`} loading="lazy" />
+      </a>
+    );
+  }
+  if (isPdfMediaUrl(item.mediaUrl)) {
+    return (
+      <button type="button" onClick={() => openPdfMediaUrl(item.mediaUrl, item.title)} className={`${compact ? "mt-2 gap-1.5 px-3 py-1.5 text-[0.68rem]" : "mt-3 gap-2 px-4 py-2 text-xs"} inline-flex items-center rounded-full bg-brand-blue font-extrabold text-white transition hover:bg-brand-deep active:scale-95`}>
+        <FileText className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} /> Abrir PDF
+      </button>
+    );
+  }
+  return (
+    <a href={item.mediaUrl} target="_blank" rel="noreferrer" className={`${compact ? "mt-2 gap-1.5 px-3 py-1.5 text-[0.68rem]" : "mt-3 gap-2 px-4 py-2 text-xs"} inline-flex items-center rounded-full bg-brand-blue font-extrabold text-white`}>
+      <ExternalLink className={compact ? "h-3.5 w-3.5" : "h-4 w-4"} /> Abrir link
+    </a>
+  );
 }
 
 function ContentSection({ title, icon, items }: { title: string; icon: React.ReactNode; items: PortalContent[] }) {
@@ -241,7 +347,7 @@ function ContentSection({ title, icon, items }: { title: string; icon: React.Rea
             <p className="text-xs font-bold uppercase text-brand-blue">{item.room}</p>
             <h3 className="mt-1 text-base font-extrabold text-brand-deep dark:text-white">{item.title}</h3>
             <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{item.body}</p>
-            {item.mediaUrl ? <a href={item.mediaUrl} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-2 rounded-full bg-brand-blue px-4 py-2 text-xs font-extrabold text-white"><ExternalLink className="h-4 w-4" /> {item.mediaUrl.startsWith("data:application/pdf") ? "Abrir PDF" : "Abrir link"}</a> : null}
+            <MediaAttachment item={item} />
           </article>
         )) : <p className="rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500 dark:bg-slate-900">Nada publicado ainda.</p>}
       </div>
@@ -287,6 +393,7 @@ export default function StudentPortalPage() {
   const [purchaseFeedback, setPurchaseFeedback] = useState("");
   const [paymentTarget, setPaymentTarget] = useState<PaymentTarget | null>(null);
   const [copiedPaymentKey, setCopiedPaymentKey] = useState(false);
+  const [selectedMinistryItemIds, setSelectedMinistryItemIds] = useState<number[]>([]);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const frontCameraInputRef = useRef<HTMLInputElement | null>(null);
   const backCameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -295,6 +402,10 @@ export default function StudentPortalPage() {
   const [profileFeedback, setProfileFeedback] = useState("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [mobileSection, setMobileSection] = useState<"contents" | "library" | "talk" | "ministry">("contents");
+  const [notifications, setNotifications] = useState<InternalNotification[]>([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [pushFeedback, setPushFeedback] = useState("");
+  const [pushActivating, setPushActivating] = useState(false);
 
   const visibleContents = useMemo(() => {
     if (!student) return [];
@@ -309,6 +420,37 @@ export default function StudentPortalPage() {
   useEffect(() => {
     setCopiedPaymentKey(false);
   }, [paymentTarget?.title, paymentTarget?.type]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const section = new URLSearchParams(window.location.search).get("section");
+    if (section === "contents" || section === "library" || section === "talk" || section === "ministry") setMobileSection(section);
+  }, []);
+
+  useEffect(() => {
+    if (!student || !isNeonProvider) return;
+    let active = true;
+    let stopForegroundListener: () => void = () => undefined;
+    const currentStudent = student;
+    void loadStudentNotifications(currentStudent.id);
+    void listenForForegroundPush((payload) => {
+      if (!active) return;
+      setPushFeedback(payload.title + ": " + payload.message);
+      void loadStudentNotifications(currentStudent.id);
+    }).then((unsubscribe) => { stopForegroundListener = unsubscribe; });
+    const timer = window.setInterval(() => void loadStudentNotifications(currentStudent.id), 30000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      stopForegroundListener();
+    };
+  }, [student?.id]);
+
+  useEffect(() => {
+    if (!student || !isNeonProvider || typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    void registerStudentPushToken(student.id);
+  }, [student?.id]);
 
   useEffect(() => {
     if (!student || isNeonProvider || !supabase) return;
@@ -329,6 +471,58 @@ export default function StudentPortalPage() {
       void db.removeChannel(channel);
     };
   }, [student?.id]);
+
+  async function loadStudentNotifications(studentId: number) {
+    try {
+      const data = await fetchNeonJson<{ items: InternalNotification[]; unread: number }>("/api/push/notifications?" + new URLSearchParams({ alunoId: String(studentId) }).toString());
+      setNotifications(data.items ?? []);
+    } catch {
+      setNotifications([]);
+    }
+  }
+
+  async function enablePushNotifications(studentId: number) {
+    if (pushActivating) return;
+    setPushActivating(true);
+    setPushFeedback("Solicitando permissão...");
+    try {
+      const result = await registerStudentPushToken(studentId);
+      setPushFeedback(result.message);
+    } finally {
+      setPushActivating(false);
+    }
+  }
+
+  function destinationSection(link: string) {
+    try {
+      const section = new URL(link, window.location.origin).searchParams.get("section");
+      return section === "contents" || section === "library" || section === "talk" || section === "ministry" ? section : "contents";
+    } catch {
+      return "contents";
+    }
+  }
+
+  async function openInternalNotification(item: InternalNotification) {
+    if (!student) return;
+    if (!item.read) {
+      await fetch("/api/push/notifications", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alunoId: student.id, notificationId: item.id }) }).catch(() => undefined);
+      setNotifications((current) => current.filter((entry) => entry.id !== item.id));
+    }
+    setMobileSection(destinationSection(item.link));
+    setNotificationsOpen(false);
+  }
+
+  async function markAllNotificationsRead() {
+    if (!student) return;
+    await fetch("/api/push/notifications", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ alunoId: student.id, markAll: true }) }).catch(() => undefined);
+    setNotifications([]);
+  }
+
+  async function logoutStudent() {
+    sessionStorage.removeItem("ebr-student-session");
+    setNotifications([]);
+    setStudent(null);
+  }
 
   async function loadStudentInteractions(currentStudent: Student) {
     if (isNeonProvider) {
@@ -362,7 +556,7 @@ export default function StudentPortalPage() {
     const [contentResult, libraryResult, ministryResult, settingsResult] = await Promise.all([
       supabase.from("student_portal_contents").select("*").eq("active", true).in("room", ["Geral", found.room]).order("published_at", { ascending: false }),
       supabase.from("student_library_items").select("id,title,description,price,image_url,payment_url,stock_quantity,active").eq("active", true).order("created_at", { ascending: false }),
-      supabase.from("student_ministry_items").select("id,title,description,price,payment_key,active").eq("active", true).order("created_at", { ascending: false }),
+      supabase.from("student_ministry_items").select("id,title,description,price,payment_key,image_url,active").eq("active", true).order("created_at", { ascending: false }),
       supabase.from("app_settings").select("*").eq("key", "general").maybeSingle()
     ]);
     setStudent(found);
@@ -647,22 +841,37 @@ export default function StudentPortalPage() {
   }
 
   function ministryReleaseDate() {
-    return addDaysToInputDate(settings.ministryListValidUntil, 1);
+    return getNextSundayInputDate();
+  }
+
+  function ministryUnavailableEntry(item: MinistryItem) {
+    const entry = ministryUnavailableMap()[String(item.id)];
+    return entry?.releaseDate && entry.releaseDate > getTodayInputDate() ? entry : null;
   }
 
   function ministryUnavailableUntil(item: MinistryItem) {
-    const releaseDate = ministryUnavailableMap()[String(item.id)];
-    return isDateBeforeToday(releaseDate) ? "" : releaseDate;
+    return ministryUnavailableEntry(item)?.releaseDate ?? "";
   }
 
-  async function markMinistryItemUnavailable(id: number) {
-    const nextUnavailable = { ...ministryUnavailableMap(), [String(id)]: ministryReleaseDate() };
+  async function markMinistryItemsUnavailable(ids: number[], method: "pix" | "cash" | "take") {
+    const nextUnavailable = ids.reduce<MinistryUnavailableMap>((current, id) => ({
+      ...current,
+      [String(id)]: {
+        releaseDate: ministryReleaseDate(),
+        studentName: student?.name ?? "Aluno",
+        method,
+        chosenAt: new Date().toISOString()
+      }
+    }), ministryUnavailableMap());
     const nextSettings = { ...settings, ministryUnavailableItems: JSON.stringify(nextUnavailable) };
+    if (isNeonProvider) {
+      const reserved = await neonMutate<{ ministryUnavailableItems: string }>("ministryChoice", "create", { itemIds: ids, studentId: student?.id, method });
+      setSettings((current) => ({ ...current, ministryUnavailableItems: reserved.ministryUnavailableItems }));
+      return;
+    }
     setSettings(nextSettings);
-    if (isNeonProvider) await neonMutate<Record<string, string>>("settings", "upsert", nextSettings);
-    else if (supabase) await supabase.from("app_settings").upsert({ key: "general", value: nextSettings, updated_at: new Date().toISOString() });
+    if (supabase) await supabase.from("app_settings").upsert({ key: "general", value: nextSettings, updated_at: new Date().toISOString() });
   }
-
   async function confirmPayment(target: PaymentTarget, options: { skipWhatsapp?: boolean } = {}) {
     const notified = options.skipWhatsapp ? Boolean(paymentResponsiblePhone(target.type)) : notifyPaymentResponsible(target);
     const copied = await copyPaymentKey(pixPayload(target));
@@ -673,7 +882,7 @@ export default function StudentPortalPage() {
       if (isNeonProvider && item) await neonMutate<LibraryItem>("libraryItem", "update", { ...item, stockQuantity: nextStock }, target.itemId);
       else if (supabase) await supabase.from("student_library_items").update({ stock_quantity: nextStock, updated_at: new Date().toISOString() }).eq("id", target.itemId);
     }
-    if (target.type === "ministry" && target.itemId) await markMinistryItemUnavailable(target.itemId);
+    if (target.type === "ministry" && target.itemId) await markMinistryItemsUnavailable([target.itemId], "pix");
     const message = notified ? (copied ? "Pagamento confirmado. O código Pix foi copiado e o responsável foi avisado." : "Pagamento confirmado. O responsável foi avisado.") : missingPaymentContactMessage(target.type);
     if (target.type === "book") setPurchaseFeedback(message);
     else setFeedback(message);
@@ -691,19 +900,35 @@ export default function StudentPortalPage() {
     openPayment({ type: "contribution", title: "Contribuição EBR", key: settings.ministryPaymentUrl ?? "" });
   }
 
-  async function handleMinistryChoice(item: MinistryItem, method: "pix" | "cash" | "take") {
-    if (method === "pix") {
-      openPayment({ type: "ministry", title: item.title, key: item.paymentKey || settings.ministryPaymentUrl || "", amount: item.price, itemId: item.id });
-      return;
-    }
-    const methodLabel = method === "cash" ? "pagar em dinheiro" : "levar";
-    const ministryPhone = paymentResponsiblePhone("ministry");
-    const notified = ministryPhone ? openWhatsappUrl("https://wa.me/" + ministryPhone + "?text=" + encodeURIComponent((student?.name ?? "Aluno") + " escolheu " + item.title + " no portal EBR e deseja " + methodLabel + ". Valor: R$ " + item.price.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ".")) : false;
-    await markMinistryItemUnavailable(item.id);
-    setFeedback(notified ? "Solicitação enviada ao responsável pelo WhatsApp." : "Produto removido da lista. Cadastre o WhatsApp geral do ministério no admin para receber avisos.");
+  function toggleMinistryItem(itemId: number) {
+    setSelectedMinistryItemIds((current) => current.includes(itemId) ? current.filter((id) => id !== itemId) : [...current, itemId]);
   }
 
+  async function handleMinistryPayment(method: "pix" | "cash" | "take") {
+    const selectedItems = ministryItems.filter((item) => selectedMinistryItemIds.includes(item.id) && !ministryUnavailableUntil(item));
+    if (!selectedItems.length) {
+      setFeedback("Escolha pelo menos um produto antes de informar o pagamento.");
+      return;
+    }
+    const ministryPhone = paymentResponsiblePhone("ministry");
+    const studentName = student?.name ?? "Aluno";
+    const amount = selectedItems.reduce((sum, item) => sum + item.price, 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const methodLabel = method === "pix" ? "pagar via Pix" : method === "cash" ? "pagar em dinheiro" : "levar";
+    const itemList = selectedItems.map((item) => `${item.title} (R$ ${item.price.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })})`).join(", ");
+    const message = `${studentName} escolheu ${selectedItems.length} produto(s) no portal EBR: ${itemList}. Total: R$ ${amount}. Forma: ${methodLabel}.${method === "pix" ? ` Chave Pix: ${EBR_HELP_PIX_KEY}.` : ""}`;
+    const whatsappUrl = ministryPhone ? "https://wa.me/" + ministryPhone + "?text=" + encodeURIComponent(message) : "";
+    const notified = openWhatsappUrl(whatsappUrl);
+    try {
+      await markMinistryItemsUnavailable(selectedItems.map((item) => item.id), method);
+      setSelectedMinistryItemIds([]);
+      setFeedback(notified ? "Solicitação enviada ao responsável pelo WhatsApp." : "Produtos removidos da lista até o próximo domingo. Cadastre o WhatsApp geral do ministério no admin para receber avisos.");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Não foi possível registrar a escolha agora.");
+    }
+  }
   const visibleMinistryItems = ministryItems;
+  const selectedMinistryItems = visibleMinistryItems.filter((item) => selectedMinistryItemIds.includes(item.id) && !ministryUnavailableUntil(item));
+  const selectedMinistryTotal = selectedMinistryItems.reduce((sum, item) => sum + item.price, 0);
 
   const mobileSectionButtons = [
     { key: "contents", label: "Conteúdos", count: visibleContents.length },
@@ -717,6 +942,8 @@ export default function StudentPortalPage() {
   const lessons = visibleContents.filter((item) => item.type === "lesson");
   const notices = visibleContents.filter((item) => item.type === "notice");
   const mobileContentItems = [...lessons, ...messages, ...notices, ...videos];
+  const unreadItems = notifications.filter((item) => !item.read);
+  const unreadNotifications = unreadItems.length;
 
   if (!student) {
     return (
@@ -747,24 +974,58 @@ export default function StudentPortalPage() {
     <main className="min-h-screen px-3 py-3 sm:px-6 sm:py-5 lg:px-8">
       <section className="mx-auto max-w-6xl space-y-3 sm:space-y-5">
         <div className="rounded-[1.25rem] bg-brand-deep p-3 text-white shadow-soft sm:rounded-[2rem] sm:p-6">
-          <div className="flex items-center justify-between gap-3">
+          <div className="grid gap-3 sm:flex sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3 sm:gap-4">
               <StudentAvatar student={student} />
-              <div className="min-w-0">
-                <p className="truncate text-[0.65rem] font-bold uppercase tracking-[0.1em] text-blue-100 sm:text-sm sm:tracking-[0.18em]">Minha sala: {student.room}</p>
-                <h1 className="truncate text-lg font-extrabold min-[380px]:text-xl sm:text-4xl">Olá, {student.name}</h1>
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-[0.65rem] font-bold uppercase leading-4 tracking-[0.1em] text-blue-100 sm:text-sm sm:tracking-[0.18em]">Minha sala: {student.room}</p>
+                <h1 className="mt-1 break-words text-lg font-extrabold leading-tight min-[380px]:text-xl sm:text-4xl">Olá, {student.name}</h1>
               </div>
             </div>
-            <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-              <button type="button" onClick={() => setProfileMenuOpen((current) => !current)} className="inline-flex h-10 items-center gap-1 rounded-full bg-white/10 px-3 text-xs font-extrabold text-white transition hover:bg-white/15 sm:gap-2 sm:px-4 sm:text-sm">
+            <div className="flex shrink-0 items-center justify-end gap-1.5 sm:gap-2">
+              <div className="relative">
+                <button type="button" aria-label="Notificações" title="Notificações" onClick={() => { setNotificationsOpen((current) => !current); setProfileMenuOpen(false); }} className="relative grid h-10 w-10 place-items-center rounded-full bg-white/10 text-white transition hover:bg-white/15">
+                  <Bell className="h-4 w-4" />
+                  {unreadNotifications ? <span className="absolute -right-1 -top-1 grid h-5 min-w-5 place-items-center rounded-full bg-red-500 px-1 text-[0.65rem] font-extrabold text-white">{Math.min(unreadNotifications, 99)}</span> : null}
+                </button>
+                {notificationsOpen ? (
+                  <div className="fixed inset-x-3 top-4 z-50 max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-[1.6rem] bg-white p-4 text-brand-deep shadow-2xl ring-1 ring-slate-200 dark:bg-slate-950 dark:text-white dark:ring-slate-800 sm:absolute sm:inset-auto sm:right-0 sm:top-12 sm:w-[min(25rem,calc(100vw-2rem))]">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-extrabold uppercase tracking-[0.14em] text-brand-blue">Notificações</p>
+                        <p className="mt-1 text-xs font-bold text-slate-500 dark:text-slate-400">{unreadNotifications} não lida(s)</p>
+                      </div>
+                      {unreadNotifications ? <button type="button" onClick={() => void markAllNotificationsRead()} className="text-xs font-extrabold text-brand-blue">Marcar todas</button> : null}
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {unreadItems.length ? unreadItems.slice(0, 12).map((item) => (
+                        <button key={item.id} type="button" onClick={() => void openInternalNotification(item)} className="w-full rounded-2xl bg-blue-50 p-3 text-left ring-1 ring-blue-100 transition dark:bg-blue-500/10 dark:ring-blue-500/20">
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</p>
+                            <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-brand-blue" />
+                          </div>
+                          <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600 dark:text-slate-300">{item.message}</p>
+                          <p className="mt-1 text-[0.68rem] font-bold text-slate-400">{item.createdAt ? new Date(item.createdAt).toLocaleString("pt-BR") : ""}</p>
+                        </button>
+                      )) : <p className="rounded-2xl bg-slate-50 p-3 text-xs font-bold text-slate-500 dark:bg-slate-900">Nenhuma notificação ainda.</p>}
+                    </div>
+                    {pushFeedback ? <p className="mt-3 rounded-2xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600 dark:bg-slate-900 dark:text-slate-300">{pushFeedback}</p> : null}
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <button type="button" disabled={pushActivating} onClick={() => void enablePushNotifications(student.id)} className="rounded-full bg-brand-blue px-3 py-2 text-xs font-extrabold text-white transition disabled:cursor-wait disabled:opacity-60">{pushActivating ? "Ativando..." : "Ativar notificações"}</button>
+                      <button type="button" onClick={() => setNotificationsOpen(false)} className="rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700 dark:bg-slate-800 dark:text-slate-200">Fechar</button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+              <button type="button" onClick={() => { setProfileMenuOpen((current) => !current); setNotificationsOpen(false); }} className="inline-flex h-10 items-center gap-1 rounded-full bg-white/10 px-3 text-xs font-extrabold text-white transition hover:bg-white/15 sm:gap-2 sm:px-4 sm:text-sm">
                 <span className="hidden min-[390px]:inline">Meu perfil</span>
                 <MoreHorizontal className="h-4 w-4" />
               </button>
-              <button onClick={() => { sessionStorage.removeItem("ebr-student-session"); setStudent(null); }} className="h-10 rounded-full bg-white/10 px-3 text-xs font-extrabold text-white transition hover:bg-white/15 sm:px-4 sm:text-sm">Sair</button>
+              <button onClick={() => void logoutStudent()} className="h-10 rounded-full bg-white/10 px-3 text-xs font-extrabold text-white transition hover:bg-white/15 sm:px-4 sm:text-sm">Sair</button>
               {profileMenuOpen ? (
                 <div className="fixed inset-x-3 top-4 z-50 max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-[1.6rem] bg-white p-4 text-brand-deep shadow-2xl ring-1 ring-slate-200 dark:bg-slate-950 dark:text-white dark:ring-slate-800 sm:absolute sm:inset-auto sm:right-6 sm:top-28 sm:w-[min(24rem,calc(100vw-2rem))]">
                   <div className="flex items-start gap-3">
-                    <StudentAvatar student={student} />
+                    <StudentAvatar student={student} large />
                     <div className="min-w-0">
                       <p className="text-sm font-extrabold uppercase tracking-[0.14em] text-brand-blue">Meu perfil</p>
                       <p className="break-words text-xs font-bold text-slate-500 dark:text-slate-400">Atualize nome e foto</p>
@@ -827,7 +1088,7 @@ export default function StudentPortalPage() {
                     <p className="text-[0.68rem] font-extrabold uppercase text-brand-blue">{typeLabels[item.type]}</p>
                     <h3 className="mt-1 line-clamp-1 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</h3>
                     {item.body ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600 dark:text-slate-300">{item.body}</p> : null}
-                    {item.mediaUrl ? <a href={item.mediaUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-brand-blue px-3 py-1.5 text-[0.68rem] font-extrabold text-white"><ExternalLink className="h-3.5 w-3.5" /> Abrir</a> : null}
+                    <MediaAttachment item={item} compact />
                   </article>
                 )) : <p className="rounded-2xl bg-slate-50 p-3 text-xs font-bold text-slate-500 dark:bg-slate-900">Nada publicado ainda.</p>}
               </div>
@@ -842,7 +1103,7 @@ export default function StudentPortalPage() {
                 {libraryItems.length ? libraryItems.map((item) => (
                   <article key={item.id} className="flex min-h-52 flex-col rounded-2xl bg-slate-50 p-2 shadow-sm dark:bg-slate-900">
                     <div className="mb-2 aspect-[4/3] overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800">
-                      {item.imageUrl ? <img src={item.imageUrl} alt={item.title} className="h-full w-full object-cover" loading="lazy" /> : <div className="grid h-full w-full place-items-center px-2 text-center text-[0.68rem] font-extrabold text-slate-400">Sem capa</div>}
+                      {item.imageUrl ? <img src={item.imageUrl} alt={item.title} className="h-full w-full object-contain p-2" loading="lazy" /> : <div className="grid h-full w-full place-items-center px-2 text-center text-[0.68rem] font-extrabold text-slate-400">Sem capa</div>}
                     </div>
                     <h3 className="line-clamp-2 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</h3>
                     {item.description ? <p className="mt-1 line-clamp-2 text-[0.68rem] leading-4 text-slate-500 dark:text-slate-400">{item.description}</p> : null}
@@ -876,23 +1137,30 @@ export default function StudentPortalPage() {
             <section className="max-h-[calc(100dvh-10.75rem)] overflow-y-auto rounded-[1.25rem] bg-brand-deep p-3 text-white shadow-soft">
               <h2 className="text-base font-extrabold">Lista do ministério</h2>
               <p className="mt-1 line-clamp-2 text-xs leading-5 text-blue-100">{settings.ministryListText || settings.ministryPaymentText || "Escolha um produto e informe como deseja contribuir."}</p>
+              <div className="mt-2 rounded-2xl bg-white/10 px-3 py-2 text-xs font-extrabold text-white">Chave Pix: {EBR_HELP_PIX_KEY}</div>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 {visibleMinistryItems.length ? visibleMinistryItems.map((item) => {
-                  const unavailableUntil = ministryUnavailableUntil(item);
+                  const unavailableInfo = ministryUnavailableEntry(item);
+                  const unavailableUntil = unavailableInfo?.releaseDate ?? "";
                   const unavailable = Boolean(unavailableUntil);
+                  const selected = selectedMinistryItemIds.includes(item.id);
                   return (
-                    <article key={item.id} className={"flex min-h-36 flex-col rounded-2xl p-2 text-brand-deep shadow-sm " + (unavailable ? "bg-white/70 opacity-60" : "bg-white")}>
+                    <article key={item.id} className={"flex min-h-36 flex-col rounded-2xl p-2 text-brand-deep shadow-sm " + (unavailable ? "bg-white/70 opacity-60" : selected ? "border-2 border-brand-green bg-emerald-50" : "bg-white")}>
+                      {item.imageUrl ? <img src={item.imageUrl} alt="" className="mb-2 h-20 w-full rounded-xl bg-slate-100 p-1 object-contain dark:bg-slate-800" /> : null}
                       <h3 className="line-clamp-2 text-sm font-extrabold">{item.title}</h3>
                       <p className="mt-1 text-sm font-extrabold text-brand-green">R$ {item.price.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                      <div className="mt-auto grid grid-cols-3 gap-1 pt-2">
-                        <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "pix")} className="rounded-full bg-brand-green px-1 py-1.5 text-[0.65rem] font-extrabold text-white disabled:opacity-50">Pix</button>
-                        <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "cash")} className="rounded-full bg-brand-deep px-1 py-1.5 text-[0.65rem] font-extrabold text-white disabled:opacity-50">Din.</button>
-                        <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "take")} className="rounded-full bg-slate-100 px-1 py-1.5 text-[0.65rem] font-extrabold text-slate-700 disabled:opacity-50">Levar</button>
-                      </div>
+                      {unavailable ? <div className="mt-2 rounded-xl bg-amber-50 px-2 py-1 text-[0.65rem] font-extrabold text-amber-700">
+                        <p className="truncate">Escolhido por {unavailableInfo?.studentName || "aluno"}</p>
+                        <p>Até {new Date(unavailableUntil + "T00:00:00").toLocaleDateString("pt-BR")}</p>
+                      </div> : null}
+                      <button type="button" disabled={unavailable} onClick={() => toggleMinistryItem(item.id)} className={"mt-auto w-full rounded-full px-2 py-2 text-[0.68rem] font-extrabold disabled:opacity-50 " + (selected ? "bg-slate-200 text-slate-700" : "bg-brand-green text-white")}>
+                        {selected ? "Remover" : "Adicionar"}
+                      </button>
                     </article>
                   );
                 }) : <p className="col-span-2 rounded-2xl bg-white/10 p-3 text-xs font-bold text-blue-100">Nenhum item disponível no momento.</p>}
               </div>
+              {selectedMinistryItems.length ? <div className="mt-3 rounded-2xl bg-white p-3 text-brand-deep shadow-sm"><p className="text-xs font-extrabold">{selectedMinistryItems.length} produto(s) selecionado(s)</p><p className="mt-1 text-sm font-extrabold text-brand-green">Total: R$ {selectedMinistryTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p><p className="mt-2 text-[0.68rem] font-bold text-slate-500">Agora escolha como deseja pagar.</p><div className="mt-2 grid grid-cols-3 gap-1"><button type="button" onClick={() => void handleMinistryPayment("pix")} className="rounded-full bg-brand-green px-1 py-2 text-[0.65rem] font-extrabold text-white">Pix</button><button type="button" onClick={() => void handleMinistryPayment("cash")} className="rounded-full bg-brand-deep px-1 py-2 text-[0.65rem] font-extrabold text-white">Din.</button><button type="button" onClick={() => void handleMinistryPayment("take")} className="rounded-full bg-slate-100 px-1 py-2 text-[0.65rem] font-extrabold text-slate-700">Levar</button></div></div> : <p className="mt-3 text-center text-[0.68rem] font-bold text-blue-100">Adicione um ou mais produtos para escolher o pagamento.</p>}
             </section>
           ) : null}
         </div>
@@ -912,7 +1180,7 @@ export default function StudentPortalPage() {
               {libraryItems.length ? libraryItems.map((item) => (
                 <article key={item.id} className="flex min-h-64 flex-col rounded-2xl bg-slate-50 p-3 shadow-sm dark:bg-slate-900">
                   <div className="aspect-[4/3] overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800">
-                    {item.imageUrl ? <img src={item.imageUrl} alt="" className="h-full w-full object-cover" /> : <div className="grid h-full w-full place-items-center px-2 text-center text-xs font-extrabold text-slate-400">Sem capa</div>}
+                    {item.imageUrl ? <img src={item.imageUrl} alt="" className="h-full w-full object-contain p-1" /> : <div className="grid h-full w-full place-items-center px-2 text-center text-xs font-extrabold text-slate-400">Sem capa</div>}
                   </div>
                   <div className="mt-3 min-w-0 flex-1">
                     <h3 className="line-clamp-2 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</h3>
@@ -942,31 +1210,35 @@ export default function StudentPortalPage() {
             <div className="rounded-[1.6rem] bg-brand-deep p-5 text-white shadow-soft">
               <h2 className="text-lg font-extrabold">Lista do ministério</h2>
               <p className="mt-2 text-sm leading-6 text-blue-100">{settings.ministryListText || settings.ministryPaymentText || "Escolha um produto e informe como deseja contribuir."}</p>
+              <div className="mt-3 rounded-2xl bg-white/10 px-4 py-3 text-sm font-extrabold text-white">Chave Pix: {EBR_HELP_PIX_KEY}</div>
               {settings.ministryListValidUntil ? <p className="mt-2 text-xs font-extrabold text-blue-100">Válido até {new Date(settings.ministryListValidUntil + "T00:00:00").toLocaleDateString("pt-BR")}</p> : null}
 
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
                 {visibleMinistryItems.length ? visibleMinistryItems.map((item) => {
-                  const unavailableUntil = ministryUnavailableUntil(item);
+                  const unavailableInfo = ministryUnavailableEntry(item);
+                  const unavailableUntil = unavailableInfo?.releaseDate ?? "";
                   const unavailable = Boolean(unavailableUntil);
+                  const selected = selectedMinistryItemIds.includes(item.id);
                   return (
-                    <article key={item.id} className={"flex min-h-52 flex-col rounded-2xl p-3 text-brand-deep shadow-sm " + (unavailable ? "bg-white/70 opacity-60" : "bg-white")}>
+                    <article key={item.id} className={"flex min-h-52 flex-col rounded-2xl p-3 text-brand-deep shadow-sm " + (unavailable ? "bg-white/70 opacity-60" : selected ? "border-2 border-brand-green bg-emerald-50" : "bg-white")}>
                       <div className="min-w-0 flex-1">
-                        <h3 className="line-clamp-2 text-sm font-extrabold">{item.title}</h3>
+                        {item.imageUrl ? <img src={item.imageUrl} alt="" className="mb-2 h-20 w-full rounded-xl bg-slate-100 p-1 object-contain dark:bg-slate-800" /> : null}
+                      <h3 className="line-clamp-2 text-sm font-extrabold">{item.title}</h3>
                         {item.description ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600">{item.description}</p> : null}
                         <p className="mt-2 text-base font-extrabold text-brand-green">R$ {item.price.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                        {unavailable ? <p className="mt-2 rounded-xl bg-amber-50 px-2 py-1 text-[0.68rem] font-extrabold text-amber-700">Indisponível até {new Date(unavailableUntil + "T00:00:00").toLocaleDateString("pt-BR")}</p> : null}
+                        {unavailable ? <div className="mt-2 rounded-xl bg-amber-50 px-2 py-1 text-[0.68rem] font-extrabold text-amber-700">
+                          <p className="truncate">Escolhido por {unavailableInfo?.studentName || "aluno"}</p>
+                          <p>Indisponível até {new Date(unavailableUntil + "T00:00:00").toLocaleDateString("pt-BR")}</p>
+                        </div> : null}
                       </div>
-                      <div className="mt-3 grid gap-2">
-                        <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "pix")} className="rounded-full bg-brand-green px-3 py-2 text-[0.7rem] font-extrabold text-white disabled:cursor-not-allowed disabled:opacity-50">Pix</button>
-                        <div className="grid grid-cols-2 gap-2">
-                          <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "cash")} className="rounded-full bg-brand-deep px-2 py-2 text-[0.7rem] font-extrabold text-white disabled:cursor-not-allowed disabled:opacity-50">Dinheiro</button>
-                          <button type="button" disabled={unavailable} onClick={() => void handleMinistryChoice(item, "take")} className="rounded-full bg-slate-100 px-2 py-2 text-[0.7rem] font-extrabold text-slate-700 disabled:cursor-not-allowed disabled:opacity-50">Levar</button>
-                        </div>
-                      </div>
+                      <button type="button" disabled={unavailable} onClick={() => toggleMinistryItem(item.id)} className={"mt-3 w-full rounded-full px-3 py-2 text-[0.7rem] font-extrabold disabled:cursor-not-allowed disabled:opacity-50 " + (selected ? "bg-slate-200 text-slate-700" : "bg-brand-green text-white")}>
+                        {selected ? "Remover da escolha" : "Adicionar à escolha"}
+                      </button>
                     </article>
                   );
                 }) : <p className="rounded-2xl bg-white/10 p-4 text-sm font-bold text-blue-100">Nenhum item disponível no momento.</p>}
               </div>
+              {selectedMinistryItems.length ? <div className="mt-4 rounded-2xl bg-white p-4 text-brand-deep shadow-sm"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-extrabold">{selectedMinistryItems.length} produto(s) selecionado(s)</p><p className="mt-1 text-base font-extrabold text-brand-green">Total: R$ {selectedMinistryTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p></div><p className="text-right text-xs font-bold text-slate-500">Escolha a forma de pagamento para todos os itens.</p></div><div className="mt-3 grid grid-cols-3 gap-2"><button type="button" onClick={() => void handleMinistryPayment("pix")} className="rounded-full bg-brand-green px-3 py-2 text-xs font-extrabold text-white">Pix</button><button type="button" onClick={() => void handleMinistryPayment("cash")} className="rounded-full bg-brand-deep px-3 py-2 text-xs font-extrabold text-white">Dinheiro</button><button type="button" onClick={() => void handleMinistryPayment("take")} className="rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700">Levar</button></div></div> : <p className="mt-4 text-center text-xs font-bold text-blue-100">Adicione um ou mais produtos para escolher o pagamento.</p>}
             </div>
           </section>
         </div>

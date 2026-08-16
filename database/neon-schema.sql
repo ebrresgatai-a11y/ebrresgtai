@@ -1,4 +1,4 @@
-﻿-- EBR Neon test schema.
+-- EBR Neon test schema.
 -- Execute este arquivo no SQL Editor do Neon antes de ligar a copia de teste ao banco.
 
 create table if not exists rooms (
@@ -142,6 +142,7 @@ create table if not exists student_ministry_items (
   description text default '',
   price numeric(12,2) default 0,
   payment_key text default '',
+  image_url text default '',
   active boolean default true,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
@@ -190,6 +191,44 @@ create table if not exists app_settings (
   updated_at timestamptz default now()
 );
 
+create table if not exists aluno_push_tokens (
+  id bigserial primary key,
+  aluno_id bigint not null references students(id) on delete cascade,
+  token text not null unique,
+  plataforma text not null default 'web',
+  ativo boolean not null default true,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create table if not exists equipe_push_tokens (
+  id bigserial primary key,
+  membro_id bigint not null references team_members(id) on delete cascade,
+  token text not null unique,
+  plataforma text not null default 'web',
+  ativo boolean not null default true,
+  criado_em timestamptz not null default now(),
+  atualizado_em timestamptz not null default now()
+);
+
+create table if not exists notificacoes (
+  id bigserial primary key,
+  aluno_id bigint not null references students(id) on delete cascade,
+  turma_id bigint references rooms(id) on delete set null,
+  titulo text not null,
+  mensagem text not null default '',
+  tipo text not null default 'conteudo',
+  link_destino text not null default '/aluno',
+  lida boolean not null default false,
+  criado_em timestamptz not null default now(),
+  lida_em timestamptz
+);
+
+create index if not exists idx_aluno_push_tokens_aluno_ativo on aluno_push_tokens(aluno_id, ativo);
+create index if not exists idx_equipe_push_tokens_membro_ativo on equipe_push_tokens(membro_id, ativo);
+create index if not exists idx_notificacoes_aluno_criado on notificacoes(aluno_id, criado_em desc);
+create index if not exists idx_notificacoes_aluno_nao_lida on notificacoes(aluno_id, lida) where lida = false;
+
 create index if not exists idx_students_room on students(room);
 create index if not exists idx_attendance_room_date on attendance_records(room, attendance_date);
 create index if not exists idx_financial_entries_date on financial_entries(date);
@@ -197,3 +236,5 @@ create index if not exists idx_portal_contents_room_active on student_portal_con
 create index if not exists idx_student_questions_student on student_questions(student_id, created_at desc);
 create index if not exists idx_student_prayers_student on student_prayer_requests(student_id, created_at desc);
 
+
+alter table student_ministry_items add column if not exists image_url text default '';

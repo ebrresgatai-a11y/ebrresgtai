@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import {
   Area,
@@ -28,6 +28,7 @@ import {
   FileSpreadsheet,
   FileText,
   KeyRound,
+  Image as ImageIcon,
   LayoutDashboard,
   Link as LinkIcon,
   LogOut,
@@ -57,6 +58,7 @@ import type { LucideIcon } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { fetchNeonJson, isNeonProvider } from "@/lib/data-provider";
+import { registerTeamPushToken } from "@/lib/firebase-client";
 
 type ViewKey =
   | "dashboard"
@@ -72,6 +74,11 @@ type ViewKey =
   | "settings";
 
 type Role = "admin" | "teacher";
+
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed" }>;
+};
 
 type AppUser = {
   id: number;
@@ -175,6 +182,10 @@ type PortalContent = {
   publishedAt: string;
 };
 
+type PortalContentDelivery = PortalContent & {
+  pushDelivery?: { saved: number; sent: number };
+};
+
 type LibraryItem = {
   id?: number;
   title: string;
@@ -192,6 +203,7 @@ type MinistryItem = {
   description: string;
   price: number;
   paymentKey: string;
+  imageUrl: string;
   active: boolean;
   createdAt?: string;
 };
@@ -237,7 +249,7 @@ const navItems: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: Ro
   { key: "exams", label: "Provas", icon: FileText, roles: ["admin", "teacher"] },
   { key: "ranking", label: "Ranking", icon: Trophy, roles: ["admin", "teacher"] },
   { key: "birthdays", label: "Aniversariantes", icon: CalendarDays, roles: ["admin", "teacher"] },
-  { key: "finance", label: "Financeiro", icon: DollarSign, roles: ["admin"] },
+  { key: "finance", label: "Financeiro", icon: DollarSign, roles: ["admin", "teacher"] },
   { key: "studentPortal", label: "Portal do Aluno", icon: MessageCircle, roles: ["admin", "teacher"] },
   { key: "schedule", label: "Escala", icon: CalendarDays, roles: ["admin", "teacher"] },
   { key: "settings", label: "Configurações", icon: Settings, roles: ["admin"] }
@@ -320,10 +332,7 @@ const pendingEnrollments: PendingEnrollment[] = [
   { id: 2, name: "Laura Mendes", phone: "(85) 99931-7710", room: "Infantil", birthday: "2018-03-12", avatar: "LM" }
 ];
 
-const initialTeam: TeamMember[] = [
-  { id: 1, name: "Pr. Renato", username: "admin", phone: "(85) 98800-1100", email: "admin@ebr.com", password: "123456", role: "admin", room: "Todas", avatar: "PR" },
-  { id: 2, name: "Larissa Melo", username: "professor", phone: "(85) 99770-3300", email: "professor@ebr.com", password: "123456", role: "teacher", room: "Adolescentes", avatar: "LM" }
-];
+const initialTeam: TeamMember[] = [];
 
 const initialCategories: Record<FinancialEntry["type"], string[]> = {
   entrada: ["ofertas", "eventos", "campanhas"],
@@ -698,7 +707,7 @@ async function loadStudentPhoto(studentId: number) {
   return error ? "" : String(data?.photo ?? "");
 }
 
-type NeonEntity = "student" | "room" | "team" | "financialEntry" | "financialCategory" | "attendanceRecord" | "attendanceBatch" | "settings" | "schedule" | "exam" | "examScore" | "portalContent" | "libraryItem" | "ministryItem" | "interaction";
+type NeonEntity = "student" | "room" | "team" | "financialEntry" | "financialEntryBatch" | "financialCategory" | "attendanceRecord" | "attendanceBatch" | "settings" | "schedule" | "exam" | "examScore" | "portalContent" | "libraryItem" | "ministryItem" | "interaction";
 type NeonAction = "create" | "update" | "delete" | "replaceList" | "upsert";
 
 async function neonMutate<T>(entity: NeonEntity, action: NeonAction, payload?: unknown, id?: number) {
@@ -984,6 +993,10 @@ function getExamTotal(studentId: number, exams = initialExams) {
   return exams.reduce((sum, exam) => sum + (exam.scores[studentId] ?? 0), 0);
 }
 
+function hasExamScoreTen(studentId: number, exams: Exam[]) {
+  return exams.some((exam) => Number(exam.scores[studentId] ?? -1) === 10);
+}
+
 function getRankingScore(student: Student, exams = initialExams) {
   return student.frequency + getExamTotal(student.id, exams);
 }
@@ -996,12 +1009,13 @@ function getRoomAttendanceStats(roomName: string, studentsSource: Student[], att
   return { studentCount, avg, presentCount, recordsCount: records.length };
 }
 
-function buildMonthlyPresenceData(records: AttendanceRecord[], scopedRooms: Room[]) {
+function buildMonthlyPresenceData(records: AttendanceRecord[], scopedRooms: Room[], year = getCurrentYear()) {
   const roomNames = new Set(scopedRooms.map((room) => normalizeRoomName(room.name)));
   const grouped = new Map<number, { present: number; total: number }>();
   records.forEach((record) => {
-    if (!roomNames.has(normalizeRoomName(record.room))) return;
-    const month = Number((record.attendanceDate || "").slice(5, 7));
+    const date = normalizeStoredDate(record.attendanceDate);
+    if (date.slice(0, 4) !== String(year) || !roomNames.has(normalizeRoomName(record.room))) return;
+    const month = Number(date.slice(5, 7));
     if (!month) return;
     const current = grouped.get(month) ?? { present: 0, total: 0 };
     current.total += 1;
@@ -1011,9 +1025,33 @@ function buildMonthlyPresenceData(records: AttendanceRecord[], scopedRooms: Room
   return monthOptions
     .map((month) => {
       const current = grouped.get(month.value);
-      return current ? { month: month.label, presenca: Math.round((current.present / current.total) * 100), engajamento: current.present } : null;
+      return current ? { month: month.label, presenca: Math.round((current.present / current.total) * 100) } : null;
     })
-    .filter(Boolean) as { month: string; presenca: number; engajamento: number }[];
+    .filter(Boolean) as { month: string; presenca: number }[];
+}
+
+function getAveragePresentByWeekday(records: AttendanceRecord[], weekday: number, roomName?: string, year = getCurrentYear()) {
+  const presentByDate = new Map<string, Set<number>>();
+  const datesWithRecords = new Set<string>();
+  records.forEach((record) => {
+    const date = normalizeStoredDate(record.attendanceDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date.slice(0, 4) !== String(year)) return;
+    if (roomName && !sameRoomName(record.room, roomName)) return;
+    if (new Date(date + "T00:00:00").getDay() !== weekday) return;
+    datesWithRecords.add(date);
+    if (record.present) {
+      const students = presentByDate.get(date) ?? new Set<number>();
+      students.add(Number(record.studentId));
+      presentByDate.set(date, students);
+    }
+  });
+  if (!datesWithRecords.size) return 0;
+  const totalPresent = Array.from(datesWithRecords).reduce((sum, date) => sum + (presentByDate.get(date)?.size ?? 0), 0);
+  return Math.round((totalPresent / datesWithRecords.size) * 10) / 10;
+}
+
+function formatAverageStudents(value: number) {
+  return value.toLocaleString("pt-BR", { minimumFractionDigits: 0, maximumFractionDigits: 1 });
 }
 
 function withLiveRoomStats(room: Room, studentsSource: Student[], attendanceRecords: AttendanceRecord[]): Room {
@@ -1030,26 +1068,75 @@ function isSundayDate(date: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(normalized) && new Date(normalized + "T00:00:00").getDay() === 0;
 }
 
+function hasPerfectSundayAttendance(student: Student, attendanceRecords: AttendanceRecord[]) {
+  const roomSundayDates = Array.from(new Set(attendanceRecords
+    .filter((record) => sameRoomName(record.room, student.room) && isSundayDate(record.attendanceDate))
+    .map((record) => normalizeStoredDate(record.attendanceDate))));
+  if (!roomSundayDates.length) return false;
+  return roomSundayDates.every((date) => attendanceRecords.some((record) =>
+    Number(record.studentId) === Number(student.id) &&
+    sameRoomName(record.room, student.room) &&
+    normalizeStoredDate(record.attendanceDate) === date &&
+    record.present
+  ));
+}
+
 function daysBetweenDates(newerDate: string, olderDate: string) {
   const newer = new Date(newerDate + "T00:00:00").getTime();
   const older = new Date(olderDate + "T00:00:00").getTime();
   return Math.round((newer - older) / 86400000);
 }
 
-function getStudentsWithConsecutiveAbsences(user: AppUser, studentsSource: Student[], attendanceRecords: AttendanceRecord[]) {
-  return scopeStudentsForUser(user, studentsSource).filter((student) => {
-    const sundayRecords = attendanceRecords
-      .filter((record) => Number(record.studentId) === Number(student.id) && sameRoomName(record.room, student.room) && isSundayDate(record.attendanceDate))
-      .sort((a, b) => b.attendanceDate.localeCompare(a.attendanceDate));
+// Resolucoes ficam em settings para que professor e admin controlem seus proprios acompanhamentos.
+type AbsenceFollowUpResolution = {
+  resolvedThrough: string;
+  resolvedAt: string;
+  resolvedBy: string;
+};
 
-    if (sundayRecords.length < 3) return false;
-    const lastThreeSundays = sundayRecords.slice(0, 3);
-    const areConsecutiveSundays =
-      daysBetweenDates(lastThreeSundays[0].attendanceDate, lastThreeSundays[1].attendanceDate) === 7 &&
-      daysBetweenDates(lastThreeSundays[1].attendanceDate, lastThreeSundays[2].attendanceDate) === 7;
+type AbsenceFollowUpResolutions = Record<string, AbsenceFollowUpResolution>;
 
-    return areConsecutiveSundays && lastThreeSundays.every((record) => !record.present);
-  });
+function parseAbsenceFollowUpResolutions(value?: string): AbsenceFollowUpResolutions {
+  try {
+    const parsed = JSON.parse(value || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as AbsenceFollowUpResolutions : {};
+  } catch {
+    return {};
+  }
+}
+
+function absenceFollowUpKey(user: AppUser, student: Student) {
+  return `${user.role}:${user.id}:${student.id}`;
+}
+
+function getConsecutiveAbsenceInfo(user: AppUser, student: Student, attendanceRecords: AttendanceRecord[], resolutions: AbsenceFollowUpResolutions = {}) {
+  const resolvedThrough = resolutions[absenceFollowUpKey(user, student)]?.resolvedThrough ?? "";
+  const sundayRecords = attendanceRecords
+    .filter((record) => {
+      const attendanceDate = normalizeStoredDate(record.attendanceDate);
+      return Number(record.studentId) === Number(student.id) &&
+        sameRoomName(record.room, student.room) &&
+        isSundayDate(attendanceDate) &&
+        (!resolvedThrough || attendanceDate > resolvedThrough);
+    })
+    .sort((a, b) => normalizeStoredDate(b.attendanceDate).localeCompare(normalizeStoredDate(a.attendanceDate)));
+
+  if (sundayRecords.length < 3) return null;
+  const lastThreeSundays = sundayRecords.slice(0, 3).map((record) => ({ ...record, attendanceDate: normalizeStoredDate(record.attendanceDate) }));
+  const areConsecutiveSundays =
+    daysBetweenDates(lastThreeSundays[0].attendanceDate, lastThreeSundays[1].attendanceDate) === 7 &&
+    daysBetweenDates(lastThreeSundays[1].attendanceDate, lastThreeSundays[2].attendanceDate) === 7;
+
+  if (!areConsecutiveSundays || !lastThreeSundays.every((record) => !record.present)) return null;
+  return {
+    student,
+    lastAbsenceDate: lastThreeSundays[0].attendanceDate,
+    dates: lastThreeSundays.map((record) => record.attendanceDate)
+  };
+}
+
+function getStudentsWithConsecutiveAbsences(user: AppUser, studentsSource: Student[], attendanceRecords: AttendanceRecord[], resolutions: AbsenceFollowUpResolutions = {}) {
+  return scopeStudentsForUser(user, studentsSource).filter((student) => Boolean(getConsecutiveAbsenceInfo(user, student, attendanceRecords, resolutions)));
 }
 
 function getBirthdayMonth(student: Student) {
@@ -1069,6 +1156,13 @@ function getBirthdayMonth(student: Student) {
   if (lowerBirthday.includes("nov")) return 11;
   if (lowerBirthday.includes("dez")) return 12;
   return getCurrentMonth();
+}
+
+function getBirthdayDay(birthday: string) {
+  if (birthday === "Hoje") return new Date().getDate();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(birthday)) return Number(birthday.split("-")[2]);
+  const match = birthday.match(/\d{1,2}/);
+  return match ? Number(match[0]) : 99;
 }
 
 const avatarPalette = [
@@ -1339,7 +1433,9 @@ function ClientOnlyChart({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function LoginView({ users, settings, onLogin }: { users: TeamMember[]; settings: Record<string, string>; onLogin: (user: AppUser) => void }) {
+type ManagementSession = { token: string; user: AppUser };
+
+function LoginView({ settings, onLogin, onBack }: { settings: Record<string, string>; onLogin: (session: ManagementSession) => Promise<void>; onBack?: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showRecovery, setShowRecovery] = useState(false);
@@ -1355,27 +1451,18 @@ function LoginView({ users, settings, onLogin }: { users: TeamMember[]; settings
     return () => window.clearTimeout(clearAutofill);
   }, []);
 
-  function submit(event: FormEvent) {
+  async function submit(event: FormEvent) {
     event.preventDefault();
-    const login = username.trim();
-    const availableUsers = users.length ? users : initialTeam;
-    const member = availableUsers.find((item) => memberMatchesLogin(item, login));
-
-    if (!member || !memberMatchesPassword(member, password)) {
-      setFeedback("Confira o usuário, email ou telefone e a senha para continuar.");
-      return;
+    setFeedback("");
+    try {
+      const session = await fetchNeonJson<ManagementSession>("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ login: username.trim(), password })
+      });
+      await onLogin(session);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Não foi possível entrar agora.");
     }
-
-    const user: AppUser = {
-      id: member.id,
-      name: member.name,
-      username: member.username,
-      email: member.email,
-      role: member.role,
-      avatar: member.avatar,
-      room: member.role === "teacher" ? member.room : undefined
-    };
-    onLogin(user);
   }
 
   return (
@@ -1397,15 +1484,8 @@ function LoginView({ users, settings, onLogin }: { users: TeamMember[]; settings
             <p className="text-sm font-bold uppercase tracking-[0.18em] text-brand-blue">{settings.loginSubtitle || "Login seguro"}</p>
             <h2 className="mt-1 text-2xl font-extrabold text-brand-deep dark:text-white sm:mt-2 sm:text-3xl">Bem-vindo de volta</h2>
           </div>
-          <a href="/aluno" className="mb-4 flex items-center justify-between gap-3 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-left transition hover:-translate-y-0.5 hover:border-brand-blue hover:bg-white dark:border-blue-500/20 dark:bg-blue-500/10 dark:hover:bg-slate-900 sm:mb-6">
-            <span>
-              <span className="block text-xs font-extrabold uppercase tracking-[0.14em] text-brand-blue">Área do aluno</span>
-              <span className="mt-1 block text-sm font-bold text-brand-deep dark:text-white">Clique aqui</span>
-            </span>
-            <LinkIcon className="h-5 w-5 shrink-0 text-brand-blue" />
-          </a>
           <div className="mb-3 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900">
-            <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-blue">Professor</p>
+            <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-blue">Professor ou administrador</p>
           </div>
           <div className="space-y-3 sm:space-y-4">
             <label className="block space-y-2">
@@ -1449,12 +1529,187 @@ function LoginView({ users, settings, onLogin }: { users: TeamMember[]; settings
             Recuperar senha
           </button>
 
+          {onBack ? <button type="button" onClick={onBack} className="mt-4 w-full text-sm font-bold text-slate-500 transition hover:text-brand-deep dark:text-slate-400 dark:hover:text-white">Voltar para a página principal</button> : null}
         </form>
       </motion.div>
     </div>
   );
 }
 
+function getYoutubeVideoThumbnail(url: string) {
+  try { const parsed = new URL(url); const id = parsed.searchParams.get("v") || parsed.pathname.split("/").filter(Boolean).pop() || ""; return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : ""; } catch { return ""; }
+}
+function InstallAppButton() {
+  const [prompt, setPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [showInvitation, setShowInvitation] = useState(false);
+
+  useEffect(() => {
+    const invitationKey = "ebr-install-invitation-seen";
+    const handler = (event: Event) => {
+      event.preventDefault();
+      setPrompt(event as BeforeInstallPromptEvent);
+      if (!localStorage.getItem(invitationKey)) setShowInvitation(true);
+    };
+    window.addEventListener("beforeinstallprompt", handler);
+    return () => window.removeEventListener("beforeinstallprompt", handler);
+  }, []);
+
+  async function requestInstall() {
+    if (!prompt) return;
+    await prompt.prompt();
+    await prompt.userChoice.catch(() => undefined);
+    localStorage.setItem("ebr-install-invitation-seen", "1");
+    setShowInvitation(false);
+    setPrompt(null);
+  }
+
+  function dismissInvitation() {
+    localStorage.setItem("ebr-install-invitation-seen", "1");
+    setShowInvitation(false);
+  }
+
+  return (
+    <>
+      {prompt ? <button type="button" onClick={() => void requestInstall()} className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2.5 text-sm font-extrabold text-brand-deep"><Download className="h-4 w-4" />Instalar app</button> : null}
+      {prompt && showInvitation ? <div className="fixed inset-x-4 bottom-4 z-50 mx-auto max-w-sm rounded-3xl bg-white p-4 text-slate-900 shadow-2xl ring-1 ring-slate-200 dark:bg-slate-900 dark:text-white dark:ring-slate-700"><div className="flex items-start gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-2xl bg-brand-deep text-white"><Download className="h-5 w-5" /></div><div><p className="font-extrabold">Instale o app EBR</p><p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">Tenha acesso rápido à EBR direto pela tela do seu celular.</p></div></div><div className="mt-4 grid grid-cols-2 gap-2"><button type="button" onClick={dismissInvitation} className="rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Agora não</button><button type="button" onClick={() => void requestInstall()} className="rounded-full bg-brand-green px-3 py-2 text-xs font-extrabold text-white">Instalar</button></div></div> : null}
+    </>
+  );
+}
+type PublicCatalogItem = {
+  id?: number;
+  title: string;
+  description: string;
+  price: number;
+  imageUrl: string;
+  href: string;
+  available: boolean;
+  unavailableLabel?: string;
+};
+
+function PublicCatalogCard({ title, subtitle, items, emptyMessage, tone }: { title: string; subtitle: string; items: PublicCatalogItem[]; emptyMessage: string; tone: "green" | "blue" }) {
+  const toneClass = tone === "green" ? "text-brand-green" : "text-brand-blue";
+  const buttonClass = tone === "green" ? "bg-brand-green" : "bg-brand-blue";
+  return (
+    <article className="rounded-[1.8rem] border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900 sm:p-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className={`text-xs font-extrabold uppercase tracking-[0.16em] ${toneClass}`}>{title}</p>
+          <h2 className="mt-1 text-2xl font-extrabold text-brand-deep dark:text-white">{subtitle}</h2>
+          <p className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">Disponíveis agora</p>
+        </div>
+        <BookOpenCheck className={`h-7 w-7 ${toneClass}`} />
+      </div>
+      {items.length ? (
+        <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {items.map((item) => (
+            <article key={item.id ?? item.title} className={`flex min-h-64 flex-col rounded-2xl p-3 shadow-sm ${item.available ? "bg-slate-50 dark:bg-slate-900" : "border border-amber-300 bg-slate-300 shadow-inner dark:border-amber-800 dark:bg-slate-800"}`}>
+              <div className={`aspect-[4/3] overflow-hidden rounded-xl ${item.available ? "bg-slate-100 dark:bg-slate-800" : "bg-white/70 dark:bg-slate-900/80"}`}>
+                {item.imageUrl ? <img src={item.imageUrl} alt={item.title} className="h-full w-full object-contain p-1" decoding="async" /> : <span className="grid h-full place-items-center text-xs font-extrabold text-slate-400">Sem imagem</span>}
+              </div>
+              <div className="mt-3 min-w-0 flex-1">
+                <h3 className="line-clamp-2 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</h3>
+                {item.description ? <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-600 dark:text-slate-300">{item.description}</p> : null}
+                <p className="mt-2 text-base font-extrabold text-brand-green">{item.price > 0 ? `R$ ${formatCurrencyBRL(item.price)}` : "Consultar"}</p>
+                {!item.available ? <p className="mt-2 rounded-xl bg-amber-200 px-2 py-1 text-xs font-extrabold text-amber-900 dark:bg-amber-950/80 dark:text-amber-100">Indisponível{item.unavailableLabel ? ` · ${item.unavailableLabel}` : ""}</p> : null}
+                <a href={item.href} className={`mt-3 inline-flex w-fit rounded-full px-4 py-2 text-xs font-extrabold text-white ${buttonClass}`}>Ver detalhes</a>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : <p className="mt-5 rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500 dark:bg-slate-800 dark:text-slate-300">{emptyMessage}</p>}
+    </article>
+  );
+}
+
+function publicMinistryUnavailableUntil(value: string | undefined, itemId?: number) {
+  if (!itemId || !value) return "";
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const raw = parsed[String(itemId)];
+    const releaseDate = typeof raw === "string" ? raw : raw && typeof raw === "object" ? String((raw as Record<string, unknown>).releaseDate || (raw as Record<string, unknown>).until || "") : "";
+    return releaseDate > getTodayInputDate() ? releaseDate : "";
+  } catch {
+    return "";
+  }
+}
+
+function PublicLandingPage({ settings, onOpenStaffLogin }: { settings: Record<string, string>; onOpenStaffLogin: (role?: Role) => void }) {
+  const [contents, setContents] = useState<PortalContent[]>([]);
+  const [libraryItems, setLibraryItems] = useState<LibraryItem[]>([]);
+  const [ministryItems, setMinistryItems] = useState<MinistryItem[]>([]);
+  const [publicSettings, setPublicSettings] = useState(settings);
+  const [loading, setLoading] = useState(true);
+  const [openCatalog, setOpenCatalog] = useState<"library" | "coffee" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPublicContent() {
+      try {
+        const data = await fetchNeonJson<{ contents?: PortalContent[]; libraryItems?: LibraryItem[]; ministryItems?: MinistryItem[]; settings?: Record<string, string> }>("/api/neon/portal?audience=student&room=Geral");
+        if (cancelled) return;
+        setPublicSettings((current) => ({ ...current, ...(data.settings ?? {}) }));
+        setContents((data.contents ?? []).map(fromDbPortalContent).filter((item) => item.active));
+        setLibraryItems((data.libraryItems ?? []).map(fromDbLibraryItem).filter((item) => item.active));
+        setMinistryItems((data.ministryItems ?? []).map(fromDbMinistryItem).filter((item) => item.active));
+      } catch {
+        if (!cancelled) { setContents([]); setLibraryItems([]); setMinistryItems([]); }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    void loadPublicContent();
+    const refreshTimer = window.setInterval(() => void loadPublicContent(), 30000);
+    return () => { cancelled = true; window.clearInterval(refreshTimer); };
+  }, []);
+
+  const title = publicSettings.sidebarTitle || "EBR";
+  const subtitle = publicSettings.sidebarSubtitle || publicSettings.churchName || "Escola Bíblica Resgatai";
+  const image = publicSettings.sidebarImage || "/ebr-logo.jpg";
+  const lesson = contents.find((item) => item.type === "lesson");
+  const videos = contents.filter((item) => item.type === "video");
+  const notices = contents.filter((item) => item.type === "message" || item.type === "notice").slice(0, 4);
+  const publicLibraryItems = libraryItems.map((item) => ({ id: item.id, title: item.title, description: item.description, price: item.price, imageUrl: item.imageUrl, href: "/aluno", available: item.stockQuantity > 0, unavailableLabel: item.stockQuantity > 0 ? undefined : "Esgotado" }));
+  const publicMinistryItems = ministryItems.map((item) => {
+    const unavailableUntil = publicMinistryUnavailableUntil(publicSettings.ministryUnavailableItems, item.id);
+    return { id: item.id, title: item.title, description: item.description, price: item.price, imageUrl: item.imageUrl, href: "/aluno", available: !unavailableUntil, unavailableLabel: unavailableUntil ? new Date(unavailableUntil + "T00:00:00").toLocaleDateString("pt-BR") : undefined };
+  });
+  const selectedCatalog = openCatalog === "library"
+    ? { title: "Livraria", subtitle: "Livros e materiais", items: publicLibraryItems, emptyMessage: "Os livros publicados aparecerão aqui.", tone: "green" as const }
+    : { title: "Lista do café", subtitle: "Produtos e contribuições", items: publicMinistryItems, emptyMessage: "Os produtos publicados aparecerão aqui.", tone: "blue" as const };
+
+  return (
+    <main className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-white">
+      <section className="bg-brand-deep px-5 py-6 text-white sm:px-8 lg:px-12">
+        <div className="mx-auto max-w-7xl">
+          <header className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="inline-flex w-fit rounded-2xl bg-white p-3 shadow-soft"><BrandLogo title={title} subtitle={subtitle} image={image} /></div>
+            <InstallAppButton />
+          </header>
+          <div className="grid gap-7 py-8 lg:grid-cols-[0.95fr_1.05fr] lg:items-center lg:py-14">
+            <div><p className="text-xs font-extrabold uppercase tracking-[0.2em] text-blue-100">Página principal da EBR</p><h1 className="mt-4 text-4xl font-extrabold leading-[1.03] sm:text-7xl">Tudo o que a EBR oferece, em um só lugar.</h1><p className="mt-5 text-base leading-7 text-blue-100 sm:text-lg">Acesse lições, vídeos, avisos e os recursos da Escola Bíblica Resgatai.</p></div>
+            <div className="rounded-[2rem] border border-white/15 bg-white/10 p-5 sm:p-6"><div className="flex items-center gap-3"><Sparkles className="h-6 w-6 text-blue-100" /><div><p className="text-xs font-extrabold uppercase tracking-[0.14em] text-blue-100">Uma experiência integrada</p><h2 className="mt-1 text-2xl font-extrabold">Aprender, acompanhar e participar</h2></div></div><div className="mt-5 grid grid-cols-3 gap-2"><div className="rounded-2xl bg-white/10 p-2.5 sm:p-4"><p className="text-xs font-extrabold sm:text-sm">Alunos</p><p className="mt-1 hidden text-xs text-blue-100 sm:block">Lições e atividades do portal.</p><a href="/aluno" className="mt-2 inline-flex w-full justify-center rounded-full bg-white px-2 py-2 text-[0.65rem] font-extrabold text-brand-deep sm:mt-3 sm:w-auto sm:px-3 sm:text-xs">Acessar</a></div><div className="rounded-2xl bg-white/10 p-2.5 sm:p-4"><p className="text-xs font-extrabold sm:text-sm">Professores</p><p className="mt-1 hidden text-xs text-blue-100 sm:block">Acompanhamento das suas turmas.</p><button type="button" onClick={() => onOpenStaffLogin("teacher")} className="mt-2 inline-flex w-full justify-center rounded-full bg-white px-2 py-2 text-[0.65rem] font-extrabold text-brand-deep sm:mt-3 sm:w-auto sm:px-3 sm:text-xs">Acessar</button></div><div className="rounded-2xl bg-white/10 p-2.5 sm:p-4"><p className="text-xs font-extrabold sm:text-sm">Gestão</p><p className="mt-1 hidden text-xs text-blue-100 sm:block">Visão ampla e gestão da EBR.</p><button type="button" onClick={() => onOpenStaffLogin("admin")} className="mt-2 inline-flex w-full justify-center rounded-full bg-white px-2 py-2 text-[0.65rem] font-extrabold text-brand-deep sm:mt-3 sm:w-auto sm:px-3 sm:text-xs">Acessar</button></div></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section className="mx-auto max-w-7xl px-5 py-6 sm:px-8 lg:px-12">
+        <div className="grid gap-4 lg:grid-cols-2">
+          <article className="rounded-[1.6rem] bg-white p-5 shadow-sm dark:bg-slate-900"><h2 className="text-2xl font-extrabold text-brand-deep dark:text-white">Lição do dia</h2>{loading ? <div className="mt-6 h-32 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-800" /> : lesson ? <div className="mt-4 rounded-2xl bg-blue-50 p-4 dark:bg-blue-950/30"><h3 className="text-xl font-extrabold text-brand-deep dark:text-white">{lesson.title}</h3><p className="mt-2 text-sm text-slate-600 dark:text-slate-300">{lesson.body || "A lição está disponível no Portal do Aluno."}</p><a href="/aluno" className="mt-4 inline-flex rounded-full bg-brand-blue px-4 py-2 text-sm font-extrabold text-white">Abrir portal</a></div> : <p className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500 dark:bg-slate-800">A próxima lição aparecerá aqui quando for publicada.</p>}</article>
+          <article className="rounded-[1.6rem] bg-white p-5 shadow-sm dark:bg-slate-900"><h2 className="text-2xl font-extrabold text-brand-deep dark:text-white">Vídeos recentes</h2>{loading ? <div className="mt-6 h-32 animate-pulse rounded-2xl bg-slate-100 dark:bg-slate-800" /> : videos.length ? <div className="mt-4 grid gap-2">{videos.slice(0, 3).map((video) => { const thumbnail = getYoutubeVideoThumbnail(video.mediaUrl); return <div key={video.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 p-3 dark:bg-slate-800">{thumbnail ? <img src={thumbnail} alt="" className="h-16 w-24 rounded-xl object-cover" /> : null}<p className="min-w-0 flex-1 truncate font-extrabold text-brand-deep dark:text-white">{video.title}</p>{video.mediaUrl ? <a href={video.mediaUrl} target="_blank" rel="noreferrer" className="rounded-full bg-brand-green px-3 py-2 text-xs font-extrabold text-white">Assistir</a> : null}</div>; })}</div> : <p className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm font-bold text-slate-500 dark:bg-slate-800">Os vídeos publicados aparecerão aqui.</p>}</article>
+        </div>
+        <section className="mt-4 rounded-[1.6rem] bg-amber-50 p-5 dark:bg-amber-950/20"><h2 className="text-2xl font-extrabold text-brand-deep dark:text-white">Mural de avisos</h2>{notices.length ? <div className="mt-4 grid gap-3 md:grid-cols-2">{notices.map((notice) => <article key={notice.id} className="rounded-2xl bg-white/70 p-4 dark:bg-slate-900/80"><h3 className="font-extrabold text-brand-deep dark:text-white">{notice.title}</h3>{notice.body ? <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{notice.body}</p> : null}</article>)}</div> : <p className="mt-4 rounded-2xl bg-white/60 p-4 text-sm font-bold text-amber-800 dark:bg-slate-900/70 dark:text-amber-100">O mural de avisos será atualizado quando houver um comunicado geral.</p>}</section>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:hidden">
+          <button type="button" onClick={() => setOpenCatalog((current) => current === "library" ? null : "library")} aria-expanded={openCatalog === "library"} className="rounded-2xl bg-brand-green px-5 py-4 text-center text-sm font-extrabold text-white shadow-sm">{openCatalog === "library" ? "Fechar livraria" : "Ver livraria"}</button>
+          <button type="button" onClick={() => setOpenCatalog((current) => current === "coffee" ? null : "coffee")} aria-expanded={openCatalog === "coffee"} className="rounded-2xl bg-brand-blue px-5 py-4 text-center text-sm font-extrabold text-white shadow-sm">{openCatalog === "coffee" ? "Fechar lista do café" : "Ver lista do café"}</button>
+        </div>
+        {openCatalog ? <div className="mt-4 lg:hidden"><PublicCatalogCard {...selectedCatalog} /></div> : null}
+        <div className="mt-6 hidden gap-4 lg:grid lg:grid-cols-2"><PublicCatalogCard title="Livraria" subtitle="Livros e materiais" items={publicLibraryItems} emptyMessage="Os livros publicados aparecerão aqui." tone="green" /><PublicCatalogCard title="Lista do café" subtitle="Produtos e contribuições" items={publicMinistryItems} emptyMessage="Os produtos publicados aparecerão aqui." tone="blue" /></div>
+        <footer className="mt-12 border-t border-slate-200 pt-6 text-sm text-slate-500 dark:border-slate-800"><p>{title} · {subtitle}</p></footer>
+      </section>
+    </main>
+  );
+}
 function PageShell({
   children,
   activeView,
@@ -1464,6 +1719,8 @@ function PageShell({
   setSearchTerm,
   studentsSource,
   attendanceRecords,
+  followUpStudents,
+  onOpenFollowUpStudents,
   churchName,
   brandTitle,
   brandSubtitle,
@@ -1477,6 +1734,8 @@ function PageShell({
   setSearchTerm: (value: string) => void;
   studentsSource: Student[];
   attendanceRecords: AttendanceRecord[];
+  followUpStudents: Student[];
+  onOpenFollowUpStudents: () => void;
   churchName: string;
   brandTitle: string;
   brandSubtitle: string;
@@ -1484,14 +1743,30 @@ function PageShell({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [dark, setDark] = useState(false);
+  const [teamPushFeedback, setTeamPushFeedback] = useState("");
   const activeLabel = navItems.find((item) => item.key === activeView)?.label ?? "Dashboard";
   const visibleNavItems = navItems.filter((item) => item.roles.includes(user.role));
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted") return;
+    void registerTeamPushToken(user.id);
+  }, [user.id]);
+
+  async function activateTeamNotifications() {
+    setTeamPushFeedback("Ativando notificações...");
+    const result = await registerTeamPushToken(user.id);
+    setTeamPushFeedback(result.message);
+  }
+
+  function logoutWithPushCleanup() {
+    onLogout();
+  }
 
   return (
     <div className={dark ? "dark" : ""}>
       <div className="min-h-screen text-slate-900 dark:text-slate-100">
         <aside className="fixed left-0 top-0 z-40 hidden h-screen w-72 overflow-y-auto border-r border-white/70 bg-white/76 px-5 py-6 pb-10 backdrop-blur-2xl dark:border-slate-800 dark:bg-slate-950/76 lg:block">
-          <Sidebar activeView={activeView} setActiveView={setActiveView} items={visibleNavItems} user={user} setSearchTerm={setSearchTerm} studentsSource={studentsSource} attendanceRecords={attendanceRecords} churchName={churchName} brandTitle={brandTitle} brandSubtitle={brandSubtitle} brandImage={brandImage} />
+          <Sidebar activeView={activeView} setActiveView={setActiveView} items={visibleNavItems} user={user} setSearchTerm={setSearchTerm} studentsSource={studentsSource} attendanceRecords={attendanceRecords} followUpStudents={followUpStudents} onOpenFollowUpStudents={onOpenFollowUpStudents} churchName={churchName} brandTitle={brandTitle} brandSubtitle={brandSubtitle} brandImage={brandImage} />
         </aside>
 
         <AnimatePresence>
@@ -1522,6 +1797,8 @@ function PageShell({
                   setSearchTerm={setSearchTerm}
                   studentsSource={studentsSource}
                   attendanceRecords={attendanceRecords}
+                  followUpStudents={followUpStudents}
+                  onOpenFollowUpStudents={onOpenFollowUpStudents}
                   churchName={churchName}
                   brandTitle={brandTitle}
                   brandSubtitle={brandSubtitle}
@@ -1550,10 +1827,15 @@ function PageShell({
 
               <div className="ml-auto" />
 
-              <div className="hidden sm:block">
-                <IconButton label="Notificacoes">
+              <div className="relative">
+                <IconButton label="Ativar notificações" onClick={() => void activateTeamNotifications()}>
                   <Bell className="h-4 w-4" />
                 </IconButton>
+                {teamPushFeedback ? (
+                  <button type="button" onClick={() => setTeamPushFeedback("")} className="fixed inset-x-3 top-16 z-50 rounded-2xl bg-white px-4 py-3 text-left text-xs font-bold text-brand-deep shadow-xl ring-1 ring-slate-200 dark:bg-slate-900 dark:text-white dark:ring-slate-700 sm:absolute sm:inset-auto sm:right-0 sm:top-12 sm:w-72">
+                    {teamPushFeedback}
+                  </button>
+                ) : null}
               </div>
               <IconButton label={dark ? "Tema claro" : "Tema escuro"} onClick={() => setDark((value) => !value)}>
                 {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
@@ -1565,7 +1847,7 @@ function PageShell({
                   <p className="text-xs text-slate-500 dark:text-slate-400">{user.role === "admin" ? "Administrador" : "Professor"}</p>
                 </div>
               </div>
-              <IconButton label="Sair" onClick={onLogout}>
+              <IconButton label="Sair" onClick={() => void logoutWithPushCleanup()}>
                 <LogOut className="h-4 w-4" />
               </IconButton>
             </div>
@@ -1585,6 +1867,8 @@ function Sidebar({
   setSearchTerm,
   studentsSource,
   attendanceRecords,
+  followUpStudents,
+  onOpenFollowUpStudents,
   churchName,
   brandTitle,
   brandSubtitle,
@@ -1597,21 +1881,16 @@ function Sidebar({
   setSearchTerm: (value: string) => void;
   studentsSource: Student[];
   attendanceRecords: AttendanceRecord[];
+  followUpStudents: Student[];
+  onOpenFollowUpStudents: () => void;
   churchName: string;
   brandTitle: string;
   brandSubtitle: string;
   brandImage: string;
 }) {
-  const followUpStudents = getStudentsWithConsecutiveAbsences(user, studentsSource, attendanceRecords);
   const followUpCount = followUpStudents.length;
   const firstFollowUp = followUpStudents[0];
   const followUpScope = user.role === "teacher" ? `na sala ${getTeacherRoom(user)}` : "em todas as salas";
-
-  function openFollowUpStudent() {
-    if (!firstFollowUp) return;
-    setSearchTerm(firstFollowUp.ra);
-    setActiveView("students");
-  }
 
   return (
     <div className="flex min-h-full flex-col pb-4">
@@ -1644,8 +1923,8 @@ function Sidebar({
 
       <button
         type="button"
-        onClick={openFollowUpStudent}
-        disabled={!firstFollowUp}
+        onClick={onOpenFollowUpStudents}
+        disabled={!followUpCount}
         className="mt-4 rounded-[1.6rem] border border-blue-100 bg-blue-50/80 p-4 text-left transition hover:-translate-y-0.5 hover:border-brand-blue hover:shadow-sm disabled:cursor-default disabled:hover:translate-y-0 disabled:hover:shadow-none dark:border-blue-500/20 dark:bg-blue-500/10 lg:mt-auto"
       >
         <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-brand-blue shadow-sm dark:bg-slate-900">
@@ -1656,7 +1935,7 @@ function Sidebar({
         {firstFollowUp ? (
           <div className="mt-3 flex items-center gap-2 rounded-2xl bg-white/72 p-2 dark:bg-slate-900/70">
             <Avatar initials={firstFollowUp.avatar} photo={firstFollowUp.photo} size="sm" />
-            <p className="min-w-0 truncate text-xs font-extrabold text-brand-blue">Contatar {firstFollowUp.name}</p>
+            <p className="min-w-0 truncate text-xs font-extrabold text-brand-blue">Ver lista: {firstFollowUp.name}{followUpCount > 1 ? ` +${followUpCount - 1}` : ""}</p>
           </div>
         ) : null}
       </button>
@@ -1711,17 +1990,34 @@ function TinyArea({ color }: { color: string }) {
   );
 }
 
+function BirthdayTodayPreview({ students }: { students: Student[] }) {
+  if (!students.length) return <p className="flex h-full items-center text-xs font-bold text-slate-400">Nenhum aniversariante hoje</p>;
+  const first = students[0];
+  return (
+    <div className="flex h-full min-w-0 items-center gap-2">
+      <Avatar initials={first.avatar} photo={first.photo} size="sm" index={2} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-extrabold text-brand-deep dark:text-white">{first.name}</p>
+        <p className="truncate text-xs font-bold text-slate-500 dark:text-slate-400">{first.room}</p>
+      </div>
+      {students.length > 1 ? <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-extrabold text-amber-800 dark:bg-amber-500/15 dark:text-amber-200">+{students.length - 1}</span> : null}
+    </div>
+  );
+}
+
 function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }: { user: AppUser; studentsSource: Student[]; roomsSource: Room[]; attendanceRecords: AttendanceRecord[] }) {
   const scopedStudents = scopeStudentsForUser(user, studentsSource);
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
   const scopedRoomNames = new Set(scopedRooms.map((room) => room.name));
-  const scopedAttendanceRecords = attendanceRecords.filter((record) => scopedRoomNames.has(record.room));
-  const scopedRoomFrequency = scopedRooms.map((room) => ({ name: room.name, freq: getRoomAttendanceStats(room.name, studentsSource, attendanceRecords).avg }));
+  const scopedAttendanceRecords = attendanceRecords.filter((record) => Array.from(scopedRoomNames).some((roomName) => sameRoomName(roomName, record.room)));
+  const scopedRoomFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(attendanceRecords, 0, room.name) }));
+  const scopedThursdayFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(attendanceRecords, 4, room.name) }));
   const monthlyPresenceData = buildMonthlyPresenceData(attendanceRecords, scopedRooms);
   const averagePresence = scopedAttendanceRecords.length
     ? Math.round((scopedAttendanceRecords.filter((record) => record.present).length / scopedAttendanceRecords.length) * 100)
     : 0;
-  const birthdaysToday = scopedStudents.filter((student) => isBirthdayToday(student.birthday)).length;
+  const birthdayStudentsToday = scopedStudents.filter((student) => isBirthdayToday(student.birthday));
+  const birthdaysToday = birthdayStudentsToday.length;
   const todayPresenceCount = attendanceRecords.filter((record) => {
     const inUserScope = user.role === "admin" || sameRoomName(record.room, getTeacherRoom(user));
     return record.attendanceDate === getTodayInputDate() && record.present && inUserScope;
@@ -1730,11 +2026,11 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
 
   return (
     <Section>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <MetricCard title="Total de alunos" value={String(scopedStudents.length)} subtitle={`visao ${scopeLabel}`} icon={<Users className="h-5 w-5 text-white" />} tone="bg-brand-deep" chart={<TinyArea color="#3B82F6" />} />
         <MetricCard title="Presentes hoje" value={String(todayPresenceCount).padStart(2, "0")} subtitle="última chamada do dia" icon={<Check className="h-5 w-5 text-white" />} tone="bg-brand-green" chart={<TinyArea color="#22C55E" />} />
         <MetricCard title="Presença média" value={`${averagePresence}%`} subtitle={user.role === "teacher" ? "somente sua sala" : "+6% vs. mês anterior"} icon={<Check className="h-5 w-5 text-white" />} tone="bg-brand-green" chart={<TinyArea color="#22C55E" />} />
-        <MetricCard title="Aniversariantes do dia" value={String(birthdaysToday).padStart(2, "0")} subtitle="celebracoes hoje" icon={<CalendarDays className="h-5 w-5 text-white" />} tone="bg-brand-gold" chart={<TinyArea color="#F59E0B" />} />
+        <MetricCard title="Aniversariantes do dia" value={String(birthdaysToday).padStart(2, "0")} subtitle="celebrações hoje" icon={<CalendarDays className="h-5 w-5 text-white" />} tone="bg-brand-gold" chart={<BirthdayTodayPreview students={birthdayStudentsToday} />} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
@@ -1742,7 +2038,7 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
           <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Presença mensal</h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400">Linha suave com progresso consolidado da EBR.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Percentual de frequência dos alunos por mês.</p>
             </div>
             <button className="inline-flex items-center gap-2 rounded-full bg-brand-deep px-4 py-2 text-sm font-bold text-white transition hover:-translate-y-0.5 hover:bg-slate-800">
               <Download className="h-4 w-4" />
@@ -1757,8 +2053,8 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
                   <LineChart data={monthlyPresenceData} margin={{ top: 14, right: 18, bottom: 4, left: -18 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,.28)" vertical={false} />
                     <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fill: "#64748B", fontSize: 12 }} />
-                    <YAxis tickLine={false} axisLine={false} tick={{ fill: "#64748B", fontSize: 12 }} />
-                    <Tooltip contentStyle={{ borderRadius: 16, border: "1px solid #E5E7EB", boxShadow: "0 16px 34px rgba(15,23,42,.12)" }} />
+                    <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} tickLine={false} axisLine={false} tick={{ fill: "#64748B", fontSize: 12 }} />
+                    <Tooltip formatter={(value) => [`${value}%`, "Frequência"]} contentStyle={{ borderRadius: 16, border: "1px solid #E5E7EB", boxShadow: "0 16px 34px rgba(15,23,42,.12)" }} />
                     <Line type="monotone" dataKey="presenca" stroke="#3B82F6" strokeWidth={4} dot={{ r: 4, fill: "#3B82F6", strokeWidth: 3, stroke: "#fff" }} />
                   </LineChart>
                 ) : <div className="grid h-full place-items-center rounded-2xl bg-slate-50 text-sm font-bold text-slate-400 dark:bg-slate-900">Sem presenças registradas para exibir.</div>}
@@ -1770,16 +2066,17 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
 
         <div className="grid gap-5">
           <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
-            <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Frequencia por sala</h2>
+            <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Média de alunos por sala</h2>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Presenças médias aos domingos durante o ano.</p>
             <div className="chart-mobile-scroll mt-5 h-64">
               <ClientOnlyChart>
               <div className="chart-mobile-canvas">
               <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={scopedRoomFrequency} layout="vertical" margin={{ top: 4, right: 20, left: 24, bottom: 4 }}>
-                    <XAxis type="number" hide domain={[0, 100]} />
+                    <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: "#64748B", fontSize: 12 }} />
                     <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={92} tick={{ fill: "#64748B", fontSize: 12 }} />
-                    <Tooltip cursor={{ fill: "rgba(59,130,246,.08)" }} contentStyle={{ borderRadius: 16, border: "1px solid #E5E7EB" }} />
-                    <Bar dataKey="freq" radius={[0, 10, 10, 0]} barSize={14}>
+                    <Tooltip cursor={{ fill: "rgba(59,130,246,.08)" }} formatter={(value) => [formatAverageStudents(Number(value)), "Alunos"]} contentStyle={{ borderRadius: 16, border: "1px solid #E5E7EB" }} />
+                    <Bar dataKey="media" radius={[0, 10, 10, 0]} barSize={14}>
                       {scopedRoomFrequency.map((_, index) => (
                         <Cell key={`cell-${index}`} fill={index % 2 === 0 ? "#3B82F6" : "#22C55E"} />
                       ))}
@@ -1792,26 +2089,28 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
           </div>
 
           <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
-            <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Tendência de engajamento</h2>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Participação em aulas, visitas e desafios.</p>
-            <div className="chart-mobile-scroll mt-4 h-36">
+            <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Média de alunos por sala às quintas</h2>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Mesmas salas, com média numérica de presenças nas quintas-feiras.</p>
+            <div className="chart-mobile-scroll mt-5 h-64">
               <ClientOnlyChart>
-              <div className="chart-mobile-canvas">
-              <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={monthlyPresenceData}>
-                    <defs>
-                      <linearGradient id="engagement" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="#F59E0B" stopOpacity={0.38} />
-                        <stop offset="100%" stopColor="#F59E0B" stopOpacity={0.03} />
-                      </linearGradient>
-                    </defs>
-                    {monthlyPresenceData.length ? <Area type="monotone" dataKey="engajamento" stroke="#F59E0B" fill="url(#engagement)" strokeWidth={3} dot={false} /> : null}
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-            </ClientOnlyChart>
+                <div className="chart-mobile-canvas">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={scopedThursdayFrequency} layout="vertical" margin={{ top: 4, right: 20, left: 24, bottom: 4 }}>
+                      <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: "#64748B", fontSize: 12 }} />
+                      <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={92} tick={{ fill: "#64748B", fontSize: 12 }} />
+                      <Tooltip cursor={{ fill: "rgba(245,158,11,.08)" }} formatter={(value) => [formatAverageStudents(Number(value)), "Alunos"]} contentStyle={{ borderRadius: 16, border: "1px solid #E5E7EB" }} />
+                      <Bar dataKey="media" radius={[0, 10, 10, 0]} barSize={14}>
+                        {scopedThursdayFrequency.map((_, index) => (
+                          <Cell key={`thursday-cell-${index}`} fill={index % 2 === 0 ? "#F59E0B" : "#3B82F6"} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </ClientOnlyChart>
             </div>
           </div>
+
         </div>
       </div>
     </Section>
@@ -1826,7 +2125,11 @@ function StudentsView({
   setStudentList,
   pendingList,
   setPendingList,
-  roomList
+  roomList,
+  followUpFilterActive,
+  followUpStudents,
+  onClearFollowUpFilter,
+  onResolveFollowUp
 }: {
   user: AppUser;
   searchTerm: string;
@@ -1836,6 +2139,10 @@ function StudentsView({
   pendingList: PendingEnrollment[];
   setPendingList: (updater: (current: PendingEnrollment[]) => PendingEnrollment[]) => void;
   roomList: Room[];
+  followUpFilterActive: boolean;
+  followUpStudents: Student[];
+  onClearFollowUpFilter: () => void;
+  onResolveFollowUp: (student: Student) => void | Promise<void>;
 }) {
   const [room, setRoom] = useState("Todas");
   const [modalOpen, setModalOpen] = useState(false);
@@ -1846,6 +2153,7 @@ function StudentsView({
   const [studentFeedback, setStudentFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const visibleStudents = scopeStudentsForUser(user, studentList);
   const visibleRooms = scopeRoomsForUser(user, roomList);
+  const followUpIds = useMemo(() => new Set(followUpStudents.map((student) => Number(student.id))), [followUpStudents]);
   const filtered = useMemo(
     () =>
       visibleStudents.filter((student) => {
@@ -1857,9 +2165,10 @@ function StudentsView({
           student.room.toLowerCase().includes(search) ||
           student.phone.includes(searchTerm);
         const matchesRoom = user.role === "teacher" || room === "Todas" || sameRoomName(student.room, room);
-        return matchesQuery && matchesRoom;
+        const matchesFollowUp = !followUpFilterActive || followUpIds.has(Number(student.id));
+        return matchesQuery && matchesRoom && matchesFollowUp;
       }),
-    [searchTerm, room, visibleStudents, user.role]
+    [searchTerm, room, visibleStudents, user.role, followUpFilterActive, followUpIds]
   );
   const nextRa = getNextRa(studentList);
 
@@ -1979,6 +2288,19 @@ function StudentsView({
         </div>
       </div>
 
+      {followUpFilterActive ? (
+        <div className="rounded-[1.6rem] border border-amber-200 bg-amber-50 p-4 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-extrabold uppercase tracking-[0.14em] text-amber-700 dark:text-amber-200">Acompanhamento de faltas</p>
+              <h3 className="mt-1 text-lg font-extrabold text-brand-deep dark:text-white">{followUpStudents.length} aluno(s) com 3 domingos consecutivos de falta</h3>
+              <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Marque como resolvido depois de entrar em contato. A contagem recomeça a partir das próximas chamadas.</p>
+            </div>
+            <button type="button" onClick={onClearFollowUpFilter} className="rounded-full bg-white px-5 py-3 text-sm font-extrabold text-slate-700 shadow-sm transition hover:-translate-y-0.5 dark:bg-slate-900 dark:text-slate-200">Ver todos</button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[1.3rem] bg-blue-50 px-4 py-3 dark:bg-blue-500/10">
           <div>
@@ -2029,6 +2351,9 @@ function StudentsView({
                   </td>
                   <td className="rounded-r-2xl px-4 py-3 text-right">
                     <div className="flex justify-end gap-2">
+                      {followUpFilterActive && followUpIds.has(Number(student.id)) ? (
+                        <button type="button" onClick={() => void onResolveFollowUp(student)} className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700 ring-1 ring-emerald-100 transition hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-200 dark:ring-emerald-500/20">Resolvido</button>
+                      ) : null}
                       <IconButton label={`Editar ${student.name}`} onClick={() => void openStudentEditor(student)}>
                         <Pencil className="h-4 w-4" />
                       </IconButton>
@@ -2983,13 +3308,24 @@ function ExamsView({
   const [selectedExamId, setSelectedExamId] = useState(visibleExams[0]?.id ?? exams[0]?.id ?? 0);
   const [editingExam, setEditingExam] = useState<Exam | null>(null);
   const [deleteExam, setDeleteExam] = useState<Exam | null>(null);
+  const [examStudentSearch, setExamStudentSearch] = useState("");
   const selectedExam = visibleExams.find((exam) => exam.id === selectedExamId) ?? visibleExams[0];
   const examStudents = selectedExam ? scopedStudents.filter((student) => sameRoomName(student.room, selectedExam.room)) : [];
+  const normalizedExamStudentSearch = examStudentSearch.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+  const filteredExamStudents = examStudents.filter((student) => {
+    if (!normalizedExamStudentSearch) return true;
+    const studentName = student.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    return studentName.includes(normalizedExamStudentSearch) || student.ra.toLowerCase().includes(normalizedExamStudentSearch);
+  });
 
   useEffect(() => {
     if (selectedExam && visibleExams.some((exam) => exam.id === selectedExamId)) return;
     setSelectedExamId(visibleExams[0]?.id ?? 0);
   }, [selectedExam?.id, selectedExamId, visibleExams]);
+
+  useEffect(() => {
+    setExamStudentSearch("");
+  }, [selectedExam?.id]);
 
   async function saveExamEdit(updatedExam: Exam) {
     setExams((current) => current.map((exam) => (exam.id === updatedExam.id ? updatedExam : exam)));
@@ -3135,12 +3471,18 @@ function ExamsView({
         </div>
 
         <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft">
-          <div className="mb-4 flex flex-col gap-1 px-1">
-            <h3 className="text-xl font-extrabold text-brand-deep dark:text-white">{selectedExam?.title ?? "Selecione uma prova"}</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400">Lance a nota de cada aluno. O ranking atualiza automaticamente.</p>
+          <div className="mb-4 flex flex-col gap-3 px-1 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h3 className="text-xl font-extrabold text-brand-deep dark:text-white">{selectedExam?.title ?? "Selecione uma prova"}</h3>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Lance a nota de cada aluno. O ranking atualiza automaticamente.</p>
+            </div>
+            <label className="flex w-full items-center rounded-full border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-700 dark:bg-slate-900 sm:w-64">
+              <Search className="mr-2 h-4 w-4 shrink-0 text-slate-400" />
+              <input value={examStudentSearch} onChange={(event) => setExamStudentSearch(event.target.value)} className="min-w-0 flex-1 bg-transparent text-sm outline-none" placeholder="Buscar aluno ou RA" />
+            </label>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
-            {examStudents.map((student, index) => (
+            {filteredExamStudents.map((student, index) => (
               <div key={student.id} className="flex items-center gap-3 rounded-2xl bg-white p-4 shadow-sm dark:bg-slate-900">
                 <Avatar initials={student.avatar} photo={student.photo} index={index} />
                 <div className="min-w-0 flex-1">
@@ -3158,6 +3500,7 @@ function ExamsView({
                 />
               </div>
             ))}
+            {selectedExam && filteredExamStudents.length === 0 ? <p className="md:col-span-2 rounded-2xl bg-slate-50 px-4 py-8 text-center text-sm font-bold text-slate-500 dark:bg-slate-900 dark:text-slate-400">Nenhum aluno encontrado para esta prova.</p> : null}
           </div>
         </div>
       </div>
@@ -3259,7 +3602,7 @@ function ExamEditorModal({
   );
 }
 
-function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, studentsSource }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; exams: Exam[]; roomsSource: Room[]; studentsSource: Student[] }) {
+function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, studentsSource, attendanceRecords }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; exams: Exam[]; roomsSource: Room[]; studentsSource: Student[]; attendanceRecords: AttendanceRecord[] }) {
   const rankingRooms = roomsSource;
   const rankingStudents = studentsSource;
   const [room, setRoom] = useState("Todas");
@@ -3274,11 +3617,20 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
     return base
       .map((student) => {
         const examTotal = getExamTotal(student.id, scoringExams);
-        return { ...student, presencePoints: student.frequency, examTotal, score: student.frequency + examTotal };
+        return {
+          ...student,
+          presencePoints: student.frequency,
+          examTotal,
+          score: student.frequency + examTotal,
+          perfectSundays: hasPerfectSundayAttendance(student, attendanceRecords),
+          scoreTen: hasExamScoreTen(student.id, scoringExams)
+        };
       })
       .sort((a, b) => b.score - a.score)
       .map((student, index) => ({ ...student, position: index + 1 }));
-  }, [room, period, searchTerm, rankingStudents, exams]);
+  }, [room, period, searchTerm, rankingStudents, exams, attendanceRecords]);
+  const perfectSundayStudents = filteredRanking.filter((student) => student.perfectSundays).slice(0, 6);
+  const scoreTenStudents = filteredRanking.filter((student) => student.scoreTen).slice(0, 6);
   const podium = filteredRanking.slice(0, 5);
   const podiumTop = [podium[1], podium[0], podium[2]].filter(Boolean);
   const podiumRest = podium.slice(3);
@@ -3310,6 +3662,10 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
             ))}
           </div>
         </div>
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <HighlightStudentsCard title="Domingos sem falta" subtitle="Alunos presentes em todos os domingos registrados" tone="green" students={perfectSundayStudents} emptyText="Sem aluno com todos os domingos presentes neste filtro." />
+        <HighlightStudentsCard title="Nota 10" subtitle="Alunos que tiraram 10 nas provas do período" tone="gold" students={scoreTenStudents} emptyText="Sem nota 10 neste filtro." />
       </div>
       <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft sm:p-5">
         <div className="grid grid-cols-3 items-end gap-1.5 sm:gap-3">
@@ -3346,7 +3702,13 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
                   <p className="truncate font-extrabold">{student.name}</p>
                   <p className="truncate text-xs text-slate-500 dark:text-slate-400">{student.room}</p>
                 </div>
-                <p className="shrink-0 text-sm font-extrabold text-brand-blue">{student.score} pts</p>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <p className="text-sm font-extrabold text-brand-blue">{student.score} pts</p>
+                  <div className="flex flex-wrap justify-end gap-1">
+                    {student.perfectSundays ? <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-extrabold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">Domingos 100%</span> : null}
+                    {student.scoreTen ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[0.65rem] font-extrabold text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">Nota 10</span> : null}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -3362,6 +3724,10 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
               <div className="min-w-0 flex-1">
                 <p className="truncate font-extrabold">{student.name}</p>
                 <p className="text-sm text-slate-500 dark:text-slate-400">{student.room}</p>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  {student.perfectSundays ? <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[0.65rem] font-extrabold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">Domingos 100%</span> : null}
+                  {student.scoreTen ? <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[0.65rem] font-extrabold text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">Nota 10</span> : null}
+                </div>
               </div>
               <div className="text-right">
                 <p className="text-lg font-extrabold text-brand-blue">{student.score} pts</p>
@@ -3371,6 +3737,36 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
         </div>
       </div>
     </Section>
+  );
+}
+
+function HighlightStudentsCard({ title, subtitle, tone, students, emptyText }: { title: string; subtitle: string; tone: "green" | "gold"; students: Array<Student & { position: number; score: number }>; emptyText: string }) {
+  const toneClasses = tone === "green"
+    ? "from-emerald-50 to-white text-emerald-700 dark:from-emerald-500/10 dark:to-slate-950 dark:text-emerald-200"
+    : "from-amber-50 to-white text-amber-700 dark:from-amber-500/10 dark:to-slate-950 dark:text-amber-200";
+  const iconClass = tone === "green" ? "bg-emerald-500" : "bg-brand-gold";
+  return (
+    <div className={"glass-panel rounded-[1.8rem] bg-gradient-to-br p-4 shadow-soft " + toneClasses}>
+      <div className="flex items-start gap-3">
+        <span className={"grid h-10 w-10 shrink-0 place-items-center rounded-2xl text-white " + iconClass}>{tone === "green" ? <Check className="h-5 w-5" /> : <Trophy className="h-5 w-5" />}</span>
+        <div className="min-w-0">
+          <h3 className="font-extrabold text-brand-deep dark:text-white">{title}</h3>
+          <p className="mt-1 text-xs font-bold text-slate-500 dark:text-slate-300">{subtitle}</p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        {students.length ? students.map((student, index) => (
+          <div key={student.id} className="flex min-w-0 items-center gap-2 rounded-2xl bg-white/80 p-2 shadow-sm dark:bg-slate-900/80">
+            <Avatar initials={student.avatar} photo={student.photo} size="sm" index={index} />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-extrabold text-brand-deep dark:text-white">{student.name}</p>
+              <p className="truncate text-xs text-slate-500 dark:text-slate-400">{student.room}</p>
+            </div>
+            <span className="shrink-0 text-xs font-black text-brand-blue">#{student.position}</span>
+          </div>
+        )) : <p className="rounded-2xl bg-white/70 p-3 text-xs font-bold text-slate-500 dark:bg-slate-900/70 dark:text-slate-300">{emptyText}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -3386,7 +3782,7 @@ function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsS
     const search = searchTerm.toLowerCase().trim();
     const matchesQuery = !search || student.name.toLowerCase().includes(search) || student.ra.toLowerCase().includes(search) || student.room.toLowerCase().includes(search);
     return matchesPeriod && matchesRoom && matchesQuery;
-  });
+  }).sort((a, b) => getBirthdayDay(a.birthday) - getBirthdayDay(b.birthday) || a.name.localeCompare(b.name, "pt-BR"));
 
   return (
     <Section>
@@ -3455,12 +3851,14 @@ function FinanceView({
   categories,
   setCategories,
   entries,
-  setEntries
+  setEntries,
+  readOnly = false
 }: {
   categories: Record<FinancialEntry["type"], string[]>;
   setCategories: (updater: (current: Record<FinancialEntry["type"], string[]>) => Record<FinancialEntry["type"], string[]>) => void;
   entries: FinancialEntry[];
   setEntries: (updater: (current: FinancialEntry[]) => FinancialEntry[]) => void;
+  readOnly?: boolean;
 }) {
   const [categoryType, setCategoryType] = useState<FinancialEntry["type"]>("entrada");
   const [newCategory, setNewCategory] = useState("");
@@ -3471,6 +3869,7 @@ function FinanceView({
   const [deleteEntry, setDeleteEntry] = useState<FinancialEntry | null>(null);
   const [financeFeedback, setFinanceFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [entryType, setEntryType] = useState<FinancialEntry["type"]>("entrada");
+  const [entryMode, setEntryMode] = useState<"standard" | "installments">("standard");
   const [selectedMonth, setSelectedMonth] = useState<string>(String(getCurrentMonth()));
   const [selectedDay, setSelectedDay] = useState<string>("todos");
   const [selectedYear, setSelectedYear] = useState(getCurrentYear());
@@ -3573,11 +3972,11 @@ function FinanceView({
     const value = Number(formData.get("value") || 0);
     const category = String(formData.get("category") || categories[entryType][0] || "sem categoria");
     const month = Number(formData.get("month") || new Date().getMonth() + 1);
-    const day = Math.max(1, Math.min(31, Number(formData.get("day") || new Date().getDate())));
     const year = Number(formData.get("year") || selectedYear);
+    const day = Math.max(1, Math.min(31, Number(formData.get("day") || new Date().getDate())));
     if (!title || value <= 0) return;
 
-    const newEntry = {
+    const newEntry: FinancialEntry = {
       id: Date.now(),
       type: entryType,
       title,
@@ -3601,6 +4000,63 @@ function FinanceView({
     } else if (supabase) {
       const { data } = await supabase.from("financial_entries").insert(toDbEntry(newEntry)).select("*").single();
       if (data) setEntries((current) => current.map((entry) => (entry.id === newEntry.id ? fromDbEntry(data) : entry)));
+    }
+  }
+
+  async function createInstallmentEntries(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const title = String(formData.get("installmentTitle") || "").trim();
+    const totalValue = Number(formData.get("installmentTotal") || 0);
+    const category = String(formData.get("installmentCategory") || categories.saida[0] || "sem categoria");
+    const month = Number(formData.get("installmentMonth") || entryMonth);
+    const day = Math.max(1, Math.min(31, Number(formData.get("installmentDay") || defaultEntryDay)));
+    const year = Number(formData.get("installmentYear") || selectedYear);
+    const installments = Math.max(2, Math.min(24, Number(formData.get("installments") || 2)));
+    const totalCents = Math.round(totalValue * 100);
+    if (!title || totalCents <= 0) return;
+
+    const baseCents = Math.floor(totalCents / installments);
+    const remainderCents = totalCents % installments;
+    const createdEntries: FinancialEntry[] = Array.from({ length: installments }, (_, index) => {
+      const dueDate = new Date(year, month - 1 + (day > 5 ? 1 : 0) + index, 5);
+      const dueMonth = dueDate.getMonth() + 1;
+      const dueYear = dueDate.getFullYear();
+      return {
+        id: Date.now() + index,
+        type: "saida",
+        title: `${title} (${index + 1}/${installments})`,
+        category,
+        value: (baseCents + (index < remainderCents ? 1 : 0)) / 100,
+        month: dueMonth,
+        year: dueYear,
+        date: makeFinancialEntryDate(5, dueMonth, dueYear)
+      };
+    });
+    const pendingEntryIds = new Set(createdEntries.map((entry) => entry.id));
+
+    setEntries((current) => [...createdEntries, ...current]);
+    const titleInput = event.currentTarget.elements.namedItem("installmentTitle") as HTMLInputElement | null;
+    const totalInput = event.currentTarget.elements.namedItem("installmentTotal") as HTMLInputElement | null;
+    const installmentsInput = event.currentTarget.elements.namedItem("installments") as HTMLSelectElement | null;
+    if (titleInput) titleInput.value = "";
+    if (totalInput) totalInput.value = "";
+    if (installmentsInput) installmentsInput.value = "2";
+
+    try {
+      if (isNeonProvider) {
+        const data = await neonMutate<FinancialEntry[]>("financialEntryBatch", "create", { entries: createdEntries });
+        setEntries((current) => [...current.filter((entry) => !pendingEntryIds.has(entry.id)), ...data].sort((a, b) => b.id - a.id));
+      } else if (supabase) {
+        const { data, error } = await supabase.from("financial_entries").insert(createdEntries.map(toDbEntry)).select("*");
+        if (error) throw error;
+        setEntries((current) => [...current.filter((entry) => !pendingEntryIds.has(entry.id)), ...(data ?? []).map(fromDbEntry)].sort((a, b) => b.id - a.id));
+      }
+      setFinanceFeedback({ kind: "success", message: `${installments} parcelas criadas com vencimento no dia 05.` });
+      window.setTimeout(() => setFinanceFeedback(null), 2200);
+    } catch {
+      setEntries((current) => current.filter((entry) => !pendingEntryIds.has(entry.id)));
+      setFinanceFeedback({ kind: "error", message: "Não foi possível salvar as parcelas no banco." });
     }
   }
 
@@ -3694,40 +4150,72 @@ function FinanceView({
         <MetricCard title="Saldo final" value={`R$ ${formatCurrencyBRL(saldo)}`} icon={<FileSpreadsheet className="h-5 w-5 text-white" />} tone="bg-brand-deep" chart={<TinyArea color="#3B82F6" />} />
       </div>
 
+      {!readOnly ? (
       <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Novo lançamento</h2>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <button type="button" onClick={() => setEntryType("entrada")} className={`rounded-full px-5 py-3 text-sm font-extrabold transition ${entryType === "entrada" ? "bg-brand-green text-white shadow-sm" : "bg-white text-slate-600 hover:text-brand-green dark:bg-slate-900 dark:text-slate-300"}`}>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <button type="button" onClick={() => { setEntryMode("standard"); setEntryType("entrada"); }} className={`rounded-full px-5 py-3 text-sm font-extrabold transition ${entryMode === "standard" && entryType === "entrada" ? "bg-brand-green text-white shadow-sm" : "bg-white text-slate-600 hover:text-brand-green dark:bg-slate-900 dark:text-slate-300"}`}>
               Inserir entrada
             </button>
-            <button type="button" onClick={() => setEntryType("saida")} className={`rounded-full px-5 py-3 text-sm font-extrabold transition ${entryType === "saida" ? "bg-brand-red text-white shadow-sm" : "bg-white text-slate-600 hover:text-brand-red dark:bg-slate-900 dark:text-slate-300"}`}>
+            <button type="button" onClick={() => { setEntryMode("standard"); setEntryType("saida"); }} className={`rounded-full px-5 py-3 text-sm font-extrabold transition ${entryMode === "standard" && entryType === "saida" ? "bg-brand-red text-white shadow-sm" : "bg-white text-slate-600 hover:text-brand-red dark:bg-slate-900 dark:text-slate-300"}`}>
               Inserir saída
+            </button>
+            <button type="button" onClick={() => { setEntryMode("installments"); setEntryType("saida"); }} className={`rounded-full px-5 py-3 text-sm font-extrabold transition ${entryMode === "installments" ? "bg-amber-400 text-amber-950 shadow-sm" : "bg-white text-slate-600 hover:text-amber-600 dark:bg-slate-900 dark:text-slate-300"}`}>
+              Saídas parceladas
             </button>
           </div>
         </div>
-        <form onSubmit={createEntry} className="mt-5 grid gap-3 lg:grid-cols-[1.4fr_0.8fr_0.55fr_0.55fr_0.55fr_0.65fr_auto]">
-          <input name="title" required className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder={entryType === "entrada" ? "Descrição da entrada" : "Descrição da saída"} />
-          <select name="category" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
-            {categories[entryType].length ? categories[entryType].map((category) => <option key={category} value={category}>{category}</option>) : <option value="sem categoria">sem categoria</option>}
-          </select>
-          <input name="value" required min="0.01" step="0.01" type="number" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Valor" />
-          <select name="month" value={entryMonth} onChange={(event) => setEntryMonth(Number(event.target.value))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
-            {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
-          </select>
-          <select name="day" defaultValue={defaultEntryDay} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
-            {entryDayOptions.map((day) => <option key={day} value={day}>Dia {String(day).padStart(2, "0")}</option>)}
-          </select>
-          <select name="year" defaultValue={selectedYear} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
-            {availableYears.map((year) => <option key={year} value={year}>{year}</option>)}
-          </select>
-          <button type="submit" className={`rounded-full px-5 py-3 text-sm font-extrabold text-white transition hover:-translate-y-0.5 ${entryType === "entrada" ? "bg-brand-green" : "bg-brand-red"}`}>
-            Salvar
-          </button>
-        </form>
+        {entryMode === "standard" ? (
+          <form onSubmit={createEntry} className="mt-5 grid gap-3 lg:grid-cols-[1.4fr_0.8fr_0.55fr_0.55fr_0.55fr_0.65fr_auto]">
+            <input name="title" required className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder={entryType === "entrada" ? "Descrição da entrada" : "Descrição da saída"} />
+            <select name="category" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {categories[entryType].length ? categories[entryType].map((category) => <option key={category} value={category}>{category}</option>) : <option value="sem categoria">sem categoria</option>}
+            </select>
+            <input name="value" required min="0.01" step="0.01" type="number" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Valor" />
+            <select name="month" value={entryMonth} onChange={(event) => setEntryMonth(Number(event.target.value))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
+            </select>
+            <select name="day" defaultValue={defaultEntryDay} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {entryDayOptions.map((day) => <option key={day} value={day}>Dia {String(day).padStart(2, "0")}</option>)}
+            </select>
+            <select name="year" defaultValue={selectedYear} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {availableYears.map((year) => <option key={year} value={year}>{year}</option>)}
+            </select>
+            <button type="submit" className={`rounded-full px-5 py-3 text-sm font-extrabold text-white transition hover:-translate-y-0.5 ${entryType === "entrada" ? "bg-brand-green" : "bg-brand-red"}`}>
+              Salvar
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={createInstallmentEntries} className="mt-5 grid gap-3 lg:grid-cols-[1.4fr_0.8fr_0.55fr_0.55fr_0.55fr_0.65fr_auto]">
+            <input name="installmentTitle" required className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Descrição da saída" />
+            <select name="installmentCategory" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {categories.saida.length ? categories.saida.map((category) => <option key={category} value={category}>{category}</option>) : <option value="sem categoria">sem categoria</option>}
+            </select>
+            <input name="installmentTotal" required min="0.01" step="0.01" type="number" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Valor total" />
+            <select name="installmentMonth" value={entryMonth} onChange={(event) => setEntryMonth(Number(event.target.value))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
+            </select>
+            <select name="installmentDay" defaultValue={defaultEntryDay} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {entryDayOptions.map((day) => <option key={day} value={day}>Dia {String(day).padStart(2, "0")}</option>)}
+            </select>
+            <select name="installmentYear" defaultValue={selectedYear} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {availableYears.map((year) => <option key={year} value={year}>{year}</option>)}
+            </select>
+            <button type="submit" className="rounded-full bg-amber-400 px-5 py-3 text-sm font-extrabold text-amber-950 transition hover:-translate-y-0.5">
+              Parcelar
+            </button>
+            <select name="installments" defaultValue="2" aria-label="Quantidade de parcelas" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {Array.from({ length: 23 }, (_, index) => index + 2).map((installment) => <option key={installment} value={installment}>{installment} parcelas</option>)}
+            </select>
+            <p className="lg:col-span-6 text-sm font-semibold text-slate-500 dark:text-slate-400">O valor total será dividido automaticamente. Até o dia 05, a primeira parcela vence no mesmo mês; após o dia 05, ela vence no mês seguinte.</p>
+          </form>
+        )}
       </div>
+
+      ) : null}
 
       <div className="grid gap-5 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
@@ -3758,6 +4246,7 @@ function FinanceView({
           </div>
         </div>
 
+        {!readOnly ? (
         <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
           <h2 className="text-xl font-extrabold text-brand-deep dark:text-white">Categorias</h2>
           <div className="mt-4 grid grid-cols-2 rounded-full bg-white p-1 shadow-sm dark:bg-slate-900">
@@ -3808,7 +4297,7 @@ function FinanceView({
               </div>
             ))}
           </div>
-        </div>
+        </div>        ) : null}
       </div>
 
       <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft">
@@ -3825,12 +4314,16 @@ function FinanceView({
               </div>
               <div className="flex items-center justify-between gap-2 sm:justify-end">
                 <p className={`text-lg font-extrabold ${entry.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>{entry.type === "entrada" ? "+" : "-"} R$ {formatCurrencyBRL(entry.value)}</p>
+                {!readOnly ? (
                 <IconButton label={`Editar lançamento ${entry.title}`} onClick={() => setEditingEntry(entry)}>
                   <Pencil className="h-4 w-4" />
                 </IconButton>
+                ) : null}
+                {!readOnly ? (
                 <IconButton label={`Excluir lançamento ${entry.title}`} onClick={() => setDeleteEntry(entry)}>
                   <Trash2 className="h-4 w-4" />
                 </IconButton>
+                ) : null}
               </div>
             </div>
           ))}
@@ -4092,11 +4585,11 @@ function fromDbPortalContent(row: any): PortalContent {
     type: row.type,
     title: row.title ?? "",
     body: row.body ?? "",
-    mediaUrl: row.media_url ?? "",
+    mediaUrl: row.mediaUrl ?? row.media_url ?? "",
     room: row.room ?? "Geral",
-    authorName: row.author_name ?? "",
-    active: Boolean(row.active),
-    publishedAt: row.published_at ?? ""
+    authorName: row.authorName ?? row.author_name ?? "",
+    active: Boolean(row.active ?? true),
+    publishedAt: row.publishedAt ?? row.published_at ?? ""
   };
 }
 
@@ -4120,9 +4613,9 @@ function fromDbLibraryItem(row: any): LibraryItem {
     title: row.title ?? "",
     description: row.description ?? "",
     price: Number(row.price ?? 0),
-    imageUrl: row.image_url ?? "",
-    paymentUrl: row.payment_url ?? "",
-    stockQuantity: Number(row.stock_quantity ?? 0),
+    imageUrl: row.imageUrl || row.image_url || row.image || row.cover || row.photo || "",
+    paymentUrl: row.paymentUrl ?? row.payment_url ?? "",
+    stockQuantity: Number(row.stockQuantity ?? row.stock_quantity ?? 0),
     active: Boolean(row.active)
   };
 }
@@ -4146,9 +4639,10 @@ function fromDbMinistryItem(row: any): MinistryItem {
     title: row.title ?? "",
     description: row.description ?? "",
     price: Number(row.price ?? 0),
-    paymentKey: row.payment_key ?? "",
-    active: Boolean(row.active),
-    createdAt: row.created_at ?? ""
+    paymentKey: row.paymentKey ?? row.payment_key ?? "",
+    imageUrl: row.imageUrl || row.image_url || row.image || row.cover || row.photo || "",
+    active: Boolean(row.active ?? true),
+    createdAt: row.createdAt ?? row.created_at ?? ""
   };
 }
 
@@ -4158,6 +4652,7 @@ function toDbMinistryItem(item: MinistryItem) {
     description: item.description,
     price: item.price,
     payment_key: item.paymentKey,
+    image_url: item.imageUrl,
     active: item.active,
     updated_at: new Date().toISOString()
   };
@@ -4198,7 +4693,7 @@ function fromDbInteraction(row: any): StudentInteraction {
     message: row.message ?? "",
     status: row.status ?? "novo",
     response: row.response ?? "",
-    createdAt: row.created_at ?? ""
+    createdAt: row.createdAt ?? row.created_at ?? ""
   };
 }
 
@@ -4215,6 +4710,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
   const [editingContentId, setEditingContentId] = useState<number | null>(null);
   const [editingLibraryId, setEditingLibraryId] = useState<number | null>(null);
   const [editingMinistryId, setEditingMinistryId] = useState<number | null>(null);
+  const [ministryModalOpen, setMinistryModalOpen] = useState(false);
   const defaultContentType: PortalContentType = user.role === "teacher" ? "lesson" : "video";
   const contentTypeOptions = Object.entries(portalTypeLabels).filter(([value]) => user.role === "admin" || value === "message" || value === "lesson");
   const [contentForm, setContentForm] = useState<PortalContent>({ type: defaultContentType, title: "", body: "", mediaUrl: "", room: availableRooms[0] ?? "Geral", authorName: user.name, active: true, publishedAt: new Date().toISOString() });
@@ -4223,7 +4719,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
   const [lessonDraft, setLessonDraft] = useState<TeacherContentDraft>(emptyTeacherDraft);
   const [messageDraft, setMessageDraft] = useState<TeacherContentDraft>(emptyTeacherDraft);
   const [libraryForm, setLibraryForm] = useState<LibraryItem>({ title: "", description: "", price: 0, imageUrl: "", paymentUrl: "", stockQuantity: 0, active: true });
-  const [ministryForm, setMinistryForm] = useState<MinistryItem>({ title: "", description: "", price: 0, paymentKey: "", active: true });
+  const [ministryForm, setMinistryForm] = useState<MinistryItem>({ title: "", description: "", price: 0, paymentKey: "", imageUrl: "", active: true });
   const [ministryUrl, setMinistryUrl] = useState(settings.ministryPaymentUrl ?? "");
   const [ministryText, setMinistryText] = useState(settings.ministryPaymentText ?? "Ajude o ministério EBR a continuar alcançando alunos.");
   const [libraryPaymentUrl, setLibraryPaymentUrl] = useState(settings.libraryPaymentUrl ?? "");
@@ -4320,7 +4816,8 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
 
   function resetMinistryForm() {
     setEditingMinistryId(null);
-    setMinistryForm({ title: "", description: "", price: 0, paymentKey: "", active: true });
+    setMinistryModalOpen(false);
+    setMinistryForm({ title: "", description: "", price: 0, paymentKey: "", imageUrl: "", active: true });
   }
 
   async function saveContent(event: FormEvent<HTMLFormElement>) {
@@ -4329,9 +4826,12 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
     const safeType: PortalContentType = user.role === "teacher" && contentForm.type === "video" ? "lesson" : contentForm.type;
     const payload = { ...contentForm, type: safeType, title: contentForm.title.trim(), authorName: user.name, room: user.role === "teacher" ? teacherRoom : contentForm.room, publishedAt: contentForm.publishedAt || new Date().toISOString() };
     setFeedback("Salvando conteúdo...");
+    let delivery: { saved: number; sent: number } | undefined;
     if (isNeonProvider) {
-      if (editingContentId) await neonMutate<PortalContent>("portalContent", "update", payload, editingContentId);
-      else await neonMutate<PortalContent>("portalContent", "create", payload);
+      const saved = editingContentId
+        ? await neonMutate<PortalContentDelivery>("portalContent", "update", payload, editingContentId)
+        : await neonMutate<PortalContentDelivery>("portalContent", "create", payload);
+      delivery = saved.pushDelivery;
       await loadPortalData();
     } else if (supabase) {
       if (editingContentId) await supabase.from("student_portal_contents").update(toDbPortalContent(payload)).eq("id", editingContentId);
@@ -4341,7 +4841,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
       setContents((current) => editingContentId ? current.map((item) => item.id === editingContentId ? { ...payload, id: editingContentId } : item) : [{ ...payload, id: Date.now() }, ...current]);
     }
     resetContentForm();
-    setFeedback("Conteúdo salvo no portal do aluno.");
+    setFeedback(delivery ? `Conteúdo salvo. ${delivery.saved} notificação(ões) interna(s) e ${delivery.sent} push enviado(s).` : "Conteúdo salvo no portal do aluno.");
   }
 
   function readPortalPdf(file: File | undefined, onRead: (value: string) => void) {
@@ -4351,8 +4851,20 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
     reader.readAsDataURL(file);
   }
 
+  async function readPortalImage(file: File | undefined, onRead: (value: string) => void) {
+    if (!file) return;
+    setFeedback("Preparando foto...");
+    const image = await compressImageFile(file, 1080, 0.8);
+    if (!image) {
+      setFeedback("Não foi possível carregar esta foto.");
+      return;
+    }
+    onRead(image);
+    setFeedback("Foto anexada. Publique para enviar ao aluno.");
+  }
+
   async function saveTeacherContent(type: "lesson" | "message", draft: TeacherContentDraft, resetDraft: () => void) {
-    if (!draft.title.trim() && !draft.body.trim()) return;
+    if (!draft.title.trim() && !draft.body.trim() && !draft.mediaUrl.trim()) return;
     const payload: PortalContent = {
       type,
       title: draft.title.trim() || (type === "lesson" ? "Lição do dia" : "Mensagem do professor"),
@@ -4364,8 +4876,10 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
       publishedAt: draft.publishedAt || new Date().toISOString()
     };
     setFeedback("Publicando no portal do aluno...");
+    let delivery: { saved: number; sent: number } | undefined;
     if (isNeonProvider) {
-      await neonMutate<PortalContent>("portalContent", "create", payload);
+      const saved = await neonMutate<PortalContentDelivery>("portalContent", "create", payload);
+      delivery = saved.pushDelivery;
       await loadPortalData();
     } else if (supabase) {
       await supabase.from("student_portal_contents").insert(toDbPortalContent(payload));
@@ -4374,7 +4888,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
       setContents((current) => [{ ...payload, id: Date.now() }, ...current]);
     }
     resetDraft();
-    setFeedback(type === "lesson" ? "Lição publicada no portal do aluno." : "Mensagem publicada no portal do aluno.");
+    setFeedback(delivery ? `${type === "lesson" ? "Lição" : "Mensagem"} publicada. ${delivery.saved} notificação(ões) interna(s) e ${delivery.sent} push enviado(s).` : type === "lesson" ? "Lição publicada no portal do aluno." : "Mensagem publicada no portal do aluno.");
   }
 
   async function deleteContent(id?: number) {
@@ -4514,10 +5028,18 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
                 </label>
                 <textarea value={lessonDraft.body} onChange={(event) => setLessonDraft((current) => ({ ...current, body: event.target.value }))} rows={6} className="resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Escreva a lição, pontos principais, sugestões e aplicações." />
                 <input value={lessonDraft.mediaUrl} onChange={(event) => setLessonDraft((current) => ({ ...current, mediaUrl: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Link opcional de apoio ou PDF" />
-                <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-100 px-4 py-3 text-xs font-extrabold text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200">
-                  <Upload className="h-4 w-4" /> Anexar PDF
-                  <input className="sr-only" type="file" accept="application/pdf" onChange={(event) => readPortalPdf(event.target.files?.[0], (value) => setLessonDraft((current) => ({ ...current, mediaUrl: value })))} />
-                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-100 px-4 py-3 text-xs font-extrabold text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200">
+                    <Upload className="h-4 w-4" /> Anexar PDF
+                    <input className="sr-only" type="file" accept="application/pdf" onChange={(event) => { readPortalPdf(event.target.files?.[0], (value) => setLessonDraft((current) => ({ ...current, mediaUrl: value }))); event.currentTarget.value = ""; }} />
+                  </label>
+                  <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-blue-50 px-4 py-3 text-xs font-extrabold text-brand-blue transition hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-100">
+                    <ImageIcon className="h-4 w-4" /> Anexar foto
+                    <input className="sr-only" type="file" accept="image/*" onChange={(event) => { void readPortalImage(event.target.files?.[0], (value) => setLessonDraft((current) => ({ ...current, mediaUrl: value }))); event.currentTarget.value = ""; }} />
+                  </label>
+                </div>
+                {lessonDraft.mediaUrl.startsWith("data:image/") ? <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900"><img src={lessonDraft.mediaUrl} alt="Prévia da foto" className="max-h-64 w-full rounded-xl object-contain" /></div> : null}
+                {lessonDraft.mediaUrl ? <button type="button" onClick={() => setLessonDraft((current) => ({ ...current, mediaUrl: "" }))} className="text-xs font-extrabold text-red-600">Remover anexo</button> : null}
                 <button type="button" onClick={() => void saveTeacherContent("lesson", lessonDraft, () => setLessonDraft(emptyTeacherDraft()))} className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">Publicar lição</button>
               </div>
             </div>
@@ -4531,10 +5053,18 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
                 </label>
                 <textarea value={messageDraft.body} onChange={(event) => setMessageDraft((current) => ({ ...current, body: event.target.value }))} rows={6} className="resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Escreva uma reflexão, palavra de evangelho, aviso pastoral ou orientação." />
                 <input value={messageDraft.mediaUrl} onChange={(event) => setMessageDraft((current) => ({ ...current, mediaUrl: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Link opcional de áudio, vídeo ou PDF" />
-                <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-100 px-4 py-3 text-xs font-extrabold text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200">
-                  <Upload className="h-4 w-4" /> Anexar PDF
-                  <input className="sr-only" type="file" accept="application/pdf" onChange={(event) => readPortalPdf(event.target.files?.[0], (value) => setMessageDraft((current) => ({ ...current, mediaUrl: value })))} />
-                </label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-slate-100 px-4 py-3 text-xs font-extrabold text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200">
+                    <Upload className="h-4 w-4" /> Anexar PDF
+                    <input className="sr-only" type="file" accept="application/pdf" onChange={(event) => { readPortalPdf(event.target.files?.[0], (value) => setMessageDraft((current) => ({ ...current, mediaUrl: value }))); event.currentTarget.value = ""; }} />
+                  </label>
+                  <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-full bg-blue-50 px-4 py-3 text-xs font-extrabold text-brand-blue transition hover:bg-blue-100 dark:bg-blue-500/10 dark:text-blue-100">
+                    <ImageIcon className="h-4 w-4" /> Anexar foto
+                    <input className="sr-only" type="file" accept="image/*" onChange={(event) => { void readPortalImage(event.target.files?.[0], (value) => setMessageDraft((current) => ({ ...current, mediaUrl: value }))); event.currentTarget.value = ""; }} />
+                  </label>
+                </div>
+                {messageDraft.mediaUrl.startsWith("data:image/") ? <div className="overflow-hidden rounded-2xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-700 dark:bg-slate-900"><img src={messageDraft.mediaUrl} alt="Prévia da foto" className="max-h-64 w-full rounded-xl object-contain" /></div> : null}
+                {messageDraft.mediaUrl ? <button type="button" onClick={() => setMessageDraft((current) => ({ ...current, mediaUrl: "" }))} className="text-xs font-extrabold text-red-600">Remover anexo</button> : null}
                 <button type="button" onClick={() => void saveTeacherContent("message", messageDraft, () => setMessageDraft(emptyTeacherDraft()))} className="rounded-full bg-brand-deep px-5 py-3 text-sm font-extrabold text-white">Publicar mensagem</button>
               </div>
             </div>
@@ -4641,7 +5171,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
               {libraryItems.map((item) => (
                 <article key={item.id} className="flex min-h-52 flex-col rounded-2xl bg-white p-3 shadow-sm dark:bg-slate-900">
-                  {item.imageUrl ? <img src={item.imageUrl} alt="" className="h-24 w-full rounded-xl object-cover" /> : <div className="grid h-24 w-full place-items-center rounded-xl bg-slate-100 text-xs font-extrabold text-slate-400 dark:bg-slate-800">Sem imagem</div>}
+                  {item.imageUrl ? <img src={item.imageUrl} alt="" className="h-24 w-full rounded-xl bg-slate-100 p-2 object-contain dark:bg-slate-800" /> : <div className="grid h-24 w-full place-items-center rounded-xl bg-slate-100 text-xs font-extrabold text-slate-400 dark:bg-slate-800">Sem imagem</div>}
                   <div className="mt-3 min-w-0 flex-1">
                     <p className="line-clamp-2 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</p>
                     <p className="mt-1 text-sm font-bold text-brand-green">R$ {formatCurrencyBRL(item.price)}</p>
@@ -4671,9 +5201,10 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
                 <button type="button" onClick={() => void saveMinistrySettings()} className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">Salvar texto e validade</button>
               </div>
             </div>
-            <form onSubmit={saveMinistryItem} className="mt-4 grid gap-3">
+            <form onSubmit={saveMinistryItem} className={ministryModalOpen ? "hidden" : "mt-4 grid gap-3"}>
               <input value={ministryForm.title} onChange={(event) => setMinistryForm((current) => ({ ...current, title: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Produto ou contribuição" />
               <textarea value={ministryForm.description} onChange={(event) => setMinistryForm((current) => ({ ...current, description: event.target.value }))} rows={3} className="resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Descrição" />
+              <PhotoCapture photo={ministryForm.imageUrl} onPhoto={(value) => setMinistryForm((current) => ({ ...current, imageUrl: value }))} previewInitials="AJ" label="Foto do produto" />
               <div className="grid gap-3 sm:grid-cols-3">
                 <input value={ministryForm.price} onChange={(event) => setMinistryForm((current) => ({ ...current, price: Number(event.target.value) }))} type="number" min="0" step="0.01" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Valor" />
                 <input value={ministryForm.paymentKey} onChange={(event) => setMinistryForm((current) => ({ ...current, paymentKey: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900 sm:col-span-2" placeholder="Chave de pagamento deste produto" />
@@ -4684,18 +5215,47 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
             <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
               {ministryItems.map((item) => (
                 <article key={item.id} className="flex min-h-44 flex-col rounded-2xl bg-white p-3 shadow-sm dark:bg-slate-900">
+                  <div className="mb-3 aspect-[4/3] overflow-hidden rounded-xl bg-slate-100 dark:bg-slate-800">
+                    {item.imageUrl ? <img src={item.imageUrl} alt={item.title} className="h-full w-full object-contain p-2" loading="lazy" /> : <div className="grid h-full w-full place-items-center px-2 text-center text-xs font-extrabold text-slate-400">Sem imagem</div>}
+                  </div>
                   <div className="min-w-0 flex-1">
                     <p className="line-clamp-2 text-sm font-extrabold text-brand-deep dark:text-white">{item.title}</p>
                     <p className="mt-1 text-sm font-bold text-brand-green">R$ {formatCurrencyBRL(item.price)}</p>
                     <p className="mt-1 text-xs font-bold text-slate-500 dark:text-slate-400">{item.active ? "Ativo" : "Indisponível"}</p>
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2">
-                    <button type="button" onClick={() => { setEditingMinistryId(item.id ?? null); setMinistryForm(item); }} className="inline-flex items-center justify-center gap-1 rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200"><Pencil className="h-3.5 w-3.5" /> Editar</button>
+                    <button type="button" onClick={() => { setEditingMinistryId(item.id ?? null); setMinistryForm(item); setMinistryModalOpen(true); }} className="inline-flex items-center justify-center gap-1 rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200"><Pencil className="h-3.5 w-3.5" /> Editar</button>
                     <button type="button" onClick={() => void deleteMinistryItem(item.id)} className="inline-flex items-center justify-center gap-1 rounded-full bg-red-50 px-3 py-2 text-xs font-extrabold text-red-700 transition hover:bg-red-100 dark:bg-red-500/10 dark:text-red-200"><Trash2 className="h-3.5 w-3.5" /> Excluir</button>
                   </div>
                 </article>
               ))}
             </div>
+            {ministryModalOpen ? (
+              <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="editar-produto-ajuda" onClick={resetMinistryForm}>
+                <div className="max-h-[92vh] w-full max-w-xl overflow-y-auto rounded-[1.8rem] bg-white p-5 shadow-2xl dark:bg-slate-900" onClick={(event) => event.stopPropagation()}>
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-blue">Lista de ajuda</p>
+                      <h4 id="editar-produto-ajuda" className="mt-1 text-xl font-extrabold text-brand-deep dark:text-white">Editar produto</h4>
+                    </div>
+                    <button type="button" onClick={resetMinistryForm} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200" aria-label="Fechar edição"><X className="h-4 w-4" /></button>
+                  </div>
+                  <form onSubmit={saveMinistryItem} className="mt-5 grid gap-3">
+                    <input autoFocus value={ministryForm.title} onChange={(event) => setMinistryForm((current) => ({ ...current, title: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Produto ou contribuição" />
+                    <textarea value={ministryForm.description} onChange={(event) => setMinistryForm((current) => ({ ...current, description: event.target.value }))} rows={3} className="resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Descrição" />
+                    <PhotoCapture photo={ministryForm.imageUrl} onPhoto={(value) => setMinistryForm((current) => ({ ...current, imageUrl: value }))} previewInitials="AJ" label="Foto do produto" />
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <input value={ministryForm.price} onChange={(event) => setMinistryForm((current) => ({ ...current, price: Number(event.target.value) }))} type="number" min="0" step="0.01" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Valor" />
+                      <input value={ministryForm.paymentKey} onChange={(event) => setMinistryForm((current) => ({ ...current, paymentKey: event.target.value }))} className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900 sm:col-span-2" placeholder="Chave de pagamento deste produto" />
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button className="rounded-full bg-brand-deep px-5 py-3 text-sm font-extrabold text-white">Salvar alterações</button>
+                      <button type="button" onClick={resetMinistryForm} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Cancelar</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -5376,10 +5936,14 @@ export default function Home() {
   const [examList, setExamList] = useState<Exam[]>(initialEbrData.exams);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(initialEbrData.attendanceRecords);
   const [settings, setSettings] = useState<Record<string, string>>(initialEbrData.settings);
-  const [dataLoading, setDataLoading] = useState(isSupabaseConfigured || isNeonProvider);
+  const [followUpFilterActive, setFollowUpFilterActive] = useState(false);
+  const [dataLoading, setDataLoading] = useState(isSupabaseConfigured);
+  const [showStaffLogin, setShowStaffLogin] = useState(false);
   const [dataReady, setDataReady] = useState(false);
   const [user, setUser] = useState<AppUser | null>(null);
   const backGuardReadyRef = useRef(false);
+  const absenceFollowUpResolutions = useMemo(() => parseAbsenceFollowUpResolutions(settings.absenceFollowUpResolutions), [settings.absenceFollowUpResolutions]);
+  const followUpStudents = useMemo(() => user ? getStudentsWithConsecutiveAbsences(user, studentList, attendanceRecords, absenceFollowUpResolutions) : [], [user, studentList, attendanceRecords, absenceFollowUpResolutions]);
 
   function applyLoadedData(data: EbrData) {
     setStudentList(data.students);
@@ -5410,37 +5974,41 @@ export default function Home() {
     });
   }
 
+  async function persistSettings(nextSettings: Record<string, string>) {
+    setSettings(nextSettings);
+    if (isNeonProvider) await neonMutate<Record<string, string>>("settings", "upsert", nextSettings);
+    else if (supabase) await supabase.from("app_settings").upsert({ key: "general", value: nextSettings, updated_at: new Date().toISOString() });
+  }
+
+  async function resolveAbsenceFollowUp(student: Student) {
+    if (!user) return;
+    const info = getConsecutiveAbsenceInfo(user, student, attendanceRecords, absenceFollowUpResolutions);
+    if (!info) return;
+    const nextResolutions: AbsenceFollowUpResolutions = {
+      ...absenceFollowUpResolutions,
+      [absenceFollowUpKey(user, student)]: {
+        resolvedThrough: info.lastAbsenceDate,
+        resolvedAt: new Date().toISOString(),
+        resolvedBy: user.name
+      }
+    };
+    await persistSettings({ ...settings, absenceFollowUpResolutions: JSON.stringify(nextResolutions) });
+  }
+
   useEffect(() => {
     let active = true;
+    if (typeof window !== "undefined" && "serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    let savedSession: ManagementSession = {} as ManagementSession;
+    try { savedSession = JSON.parse(sessionStorage.getItem(EBR_SESSION_STORAGE_KEY) ?? "{}") as ManagementSession; } catch { sessionStorage.removeItem(EBR_SESSION_STORAGE_KEY); }
+    if (isNeonProvider && !savedSession.token) { setDataLoading(false); setDataReady(true); return () => { active = false; }; }
     loadEbrData().then((data) => {
       if (!active) return;
       applyLoadedData(data);
-      try {
-        const savedSession = sessionStorage.getItem(EBR_SESSION_STORAGE_KEY);
-        if (savedSession) {
-          const savedUser = JSON.parse(savedSession) as AppUser;
-          const member = data.team.find((item) => item.id === savedUser.id || item.username === savedUser.username);
-          if (member) {
-            setUser({
-              id: member.id,
-              name: member.name,
-              username: member.username,
-              email: member.email,
-              role: member.role,
-              avatar: member.avatar,
-              room: member.role === "teacher" ? member.room : undefined
-            });
-          }
-        }
-      } catch {
-        sessionStorage.removeItem(EBR_SESSION_STORAGE_KEY);
-      }
+      if (savedSession.token && savedSession.user) setUser(savedSession.user); else sessionStorage.removeItem(EBR_SESSION_STORAGE_KEY);
       setDataLoading(false);
       setDataReady(true);
     });
-    return () => {
-      active = false;
-    };
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {
@@ -5547,42 +6115,52 @@ export default function Home() {
   }
 
   if (!user) {
-    return <LoginView users={team} settings={settings} onLogin={(nextUser) => {
-      sessionStorage.setItem(EBR_SESSION_STORAGE_KEY, JSON.stringify(nextUser));
-      setUser(nextUser);
+    if (!showStaffLogin) return <PublicLandingPage settings={settings} onOpenStaffLogin={() => setShowStaffLogin(true)} />;
+    return <LoginView settings={settings} onBack={() => setShowStaffLogin(false)} onLogin={async (session) => {
+      sessionStorage.setItem(EBR_SESSION_STORAGE_KEY, JSON.stringify(session));
+      setUser(session.user);
+      setDataLoading(true);
+      try { const data = await loadEbrData(); applyLoadedData(data); setDataReady(true); } finally { setDataLoading(false); }
     }} />;
   }
-
   function setSearchForView(view: ViewKey, value: string) {
     setSearchTerms((current) => ({ ...current, [view]: value }));
   }
 
   function changeView(view: ViewKey) {
+    setFollowUpFilterActive(false);
     setSearchTerms((current) => ({ ...current, [activeView]: "" }));
     setActiveView(view);
   }
 
+  function openAbsenceFollowUps() {
+    setFollowUpFilterActive(true);
+    setSearchTerms((current) => ({ ...current, [activeView]: "", students: "" }));
+    setActiveView("students");
+  }
+
   function openRoomStudents(roomName: string) {
+    setFollowUpFilterActive(false);
     setSearchTerms((current) => ({ ...current, [activeView]: "", students: roomName }));
     setActiveView("students");
   }
 
   const views: Record<ViewKey, ReactNode> = {
     dashboard: <DashboardView user={user} studentsSource={studentList} roomsSource={roomList} attendanceRecords={attendanceRecords} />,
-    students: <StudentsView user={user} searchTerm={searchTerms.students ?? ""} setSearchTerm={(value) => setSearchForView("students", value)} studentList={studentList} setStudentList={setStudentList} pendingList={pendingList} setPendingList={setPendingList} roomList={roomList} />,
+    students: <StudentsView user={user} searchTerm={searchTerms.students ?? ""} setSearchTerm={(value) => setSearchForView("students", value)} studentList={studentList} setStudentList={setStudentList} pendingList={pendingList} setPendingList={setPendingList} roomList={roomList} followUpFilterActive={followUpFilterActive} followUpStudents={followUpStudents} onClearFollowUpFilter={() => setFollowUpFilterActive(false)} onResolveFollowUp={resolveAbsenceFollowUp} />,
     rooms: <RoomsView user={user} searchTerm={searchTerms.rooms ?? ""} setSearchTerm={(value) => setSearchForView("rooms", value)} roomList={roomList} setRoomList={setRoomList} team={team} setTeam={setTeam} studentsSource={studentList} attendanceRecords={attendanceRecords} onOpenRoomStudents={openRoomStudents} />,
     attendance: <AttendanceView user={user} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} setAttendanceRecords={setAttendanceRecords} setStudents={setStudentList} />,
     exams: <ExamsView user={user} exams={examList} setExams={setExamList} roomsSource={roomList} studentsSource={studentList} />,
-    ranking: <RankingView user={user} searchTerm={searchTerms.ranking ?? ""} setSearchTerm={(value) => setSearchForView("ranking", value)} exams={examList} roomsSource={roomList} studentsSource={studentList} />,
+    ranking: <RankingView user={user} searchTerm={searchTerms.ranking ?? ""} setSearchTerm={(value) => setSearchForView("ranking", value)} exams={examList} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} />,
     birthdays: <BirthdaysView user={user} searchTerm={searchTerms.birthdays ?? ""} setSearchTerm={(value) => setSearchForView("birthdays", value)} roomsSource={roomList} studentsSource={studentList} />,
-    finance: <FinanceView categories={financialCategories} setCategories={setFinancialCategories} entries={financialEntries} setEntries={setFinancialEntries} />,
+    finance: <FinanceView categories={financialCategories} setCategories={setFinancialCategories} entries={financialEntries} setEntries={setFinancialEntries} readOnly={user.role !== "admin"} />,
     studentPortal: <StudentPortalAdminView user={user} roomsSource={roomList} settings={settings} setSettings={setSettings} />,
     schedule: <TeacherScheduleView user={user} team={team} settings={settings} setSettings={setSettings} />,
     settings: <SettingsView team={team} setTeam={setTeam} roomsSource={roomList} settings={settings} setSettings={setSettings} />
   };
 
   return (
-    <PageShell activeView={activeView} setActiveView={changeView} user={user} onLogout={logout} setSearchTerm={(value) => setSearchForView("students", value)} studentsSource={studentList} attendanceRecords={attendanceRecords} churchName={settings.churchName} brandTitle={settings.sidebarTitle || "EBR"} brandSubtitle={settings.sidebarSubtitle || settings.churchName || "Escola Bíblica Resgatai"} brandImage={settings.sidebarImage || "/ebr-logo.jpg"}>
+    <PageShell activeView={activeView} setActiveView={changeView} user={user} onLogout={logout} setSearchTerm={(value) => setSearchForView("students", value)} studentsSource={studentList} attendanceRecords={attendanceRecords} followUpStudents={followUpStudents} onOpenFollowUpStudents={openAbsenceFollowUps} churchName={settings.churchName} brandTitle={settings.sidebarTitle || "EBR"} brandSubtitle={settings.sidebarSubtitle || settings.churchName || "Escola Bíblica Resgatai"} brandImage={settings.sidebarImage || "/ebr-logo.jpg"}>
       <AnimatePresence mode="wait">
         <motion.div key={activeView}>{views[activeView]}</motion.div>
       </AnimatePresence>

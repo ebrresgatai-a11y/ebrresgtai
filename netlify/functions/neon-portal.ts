@@ -1,4 +1,5 @@
 import type { Config, Context } from "@netlify/functions";
+import { AuthError, requireManagementSession } from "./_shared/auth";
 import { getNeonSql, jsonResponse } from "./_shared/neon";
 
 function content(row: any) {
@@ -8,7 +9,7 @@ function library(row: any) {
   return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), imageUrl: row.image_url ?? "", paymentUrl: row.payment_url ?? "", stockQuantity: Number(row.stock_quantity ?? 0), active: Boolean(row.active) };
 }
 function ministry(row: any) {
-  return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), paymentKey: row.payment_key ?? "", active: Boolean(row.active), createdAt: row.created_at ?? "" };
+  return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), paymentKey: row.payment_key ?? "", imageUrl: row.image_url ?? "", active: Boolean(row.active), createdAt: row.created_at ?? "" };
 }
 function dateOnly(value: unknown) {
   if (!value) return "";

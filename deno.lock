@@ -18,19 +18,23 @@
         "npm:@types/react-dom@19.2.3",
         "npm:@types/react@19.2.14",
         "npm:autoprefixer@10.5.0",
+        "npm:firebase-admin@14",
+        "npm:firebase@^12.15.0",
         "npm:framer-motion@12.38.0",
         "npm:lucide-react@1.16.0",
         "npm:netlify-cli@^26.0.2",
-        "npm:next@16.2.6",
-        "npm:postcss@8.5.14",
+        "npm:next@16.2.12",
+        "npm:postcss@8.5.17",
+        "npm:postgres@^3.4.9",
         "npm:react-dom@19.2.6",
         "npm:react@19.2.6",
         "npm:recharts@3.8.1",
+        "npm:sharp@~0.35.3",
         "npm:tailwindcss@3.4.19",
         "npm:typescript@6.0.3"
       ],
       "overrides": {
-        "postcss": "8.5.14"
+        "postcss": "8.5.17"
       }
     }
   }

@@ -13,9 +13,7 @@ function readEnv(name: string) {
 
 export function getDatabaseUrl() {
   const databaseUrl = readEnv("DATABASE_URL") || readEnv("NETLIFY_DATABASE_URL");
-  if (!databaseUrl) {
-    throw new Error("DATABASE_URL nao configurada para o banco Neon.");
-  }
+  if (!databaseUrl) throw new Error("DATABASE_URL não configurada para o banco Neon.");
   return databaseUrl;
 }
 
@@ -28,6 +26,9 @@ export function jsonResponse(data: unknown, init?: ResponseInit) {
     ...init,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store, max-age=0",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
       ...init?.headers
     }
   });

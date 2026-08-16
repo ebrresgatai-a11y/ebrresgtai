@@ -1,4 +1,5 @@
-﻿import type { Config, Context } from "@netlify/functions";
+import type { Config, Context } from "@netlify/functions";
+import { AuthError, requireManagementSession } from "./_shared/auth";
 import { getNeonSql, jsonResponse } from "./_shared/neon";
 
 function dateOnly(value: unknown) {
@@ -58,7 +59,6 @@ function teamFromRow(row: any) {
     username: row.username ?? "",
     email: row.email ?? "",
     phone: row.phone ?? "",
-    password: row.password ?? "",
     role: row.role ?? "teacher",
     room: row.room ?? "",
     avatar: row.avatar ?? "",
@@ -111,15 +111,16 @@ function examFromRow(row: any, scores: any[]) {
   };
 }
 
-export default async (_req: Request, _context: Context) => {
+export default async (req: Request, _context: Context) => {
   try {
+    const session = requireManagementSession(req);
     const sql = getNeonSql();
     const rows = await sql`
       select
         (select coalesce(json_agg(r order by r.id), '[]'::json) from rooms r) as rooms,
         (select coalesce(json_agg(json_build_object('id', s.id, 'ra', s.ra, 'name', s.name, 'phone', s.phone, 'room', s.room, 'frequency', s.frequency, 'status', s.status, 'birthday', s.birthday, 'age', s.age, 'avatar', s.avatar, 'photo', s.photo) order by s.id), '[]'::json) from students s) as students,
         (select coalesce(json_agg(p order by p.id), '[]'::json) from pending_enrollments p) as pending,
-        (select coalesce(json_agg(json_build_object('id', t.id, 'name', t.name, 'username', t.username, 'email', t.email, 'phone', t.phone, 'password', t.password, 'role', t.role, 'room', t.room, 'avatar', t.avatar, 'photo', t.photo) order by t.id), '[]'::json) from team_members t) as team,
+        (select coalesce(json_agg(json_build_object('id', t.id, 'name', t.name, 'username', t.username, 'email', t.email, 'phone', t.phone, 'role', t.role, 'room', t.room, 'avatar', t.avatar, 'photo', t.photo) order by t.id), '[]'::json) from team_members t) as team,
         (select coalesce(json_agg(c order by c.name), '[]'::json) from financial_categories c) as categories,
         (select coalesce(json_agg(e order by e.id desc), '[]'::json) from financial_entries e) as entries,
         (select coalesce(json_agg(ex order by ex.id desc), '[]'::json) from exams ex) as exams,
@@ -138,6 +139,15 @@ export default async (_req: Request, _context: Context) => {
     const scores = rowsOf(payload.scores);
     const attendance = rowsOf(payload.attendance);
     const settingsValue = payload.settings ?? {};
+    const room = String(session.room ?? "").trim().toLowerCase();
+    const scoped = session.role === "teacher";
+    const scopedStudents = scoped ? (students as any[]).filter((item) => String(item.room ?? "").trim().toLowerCase() === room) : students as any[];
+    const scopedStudentIds = new Set(scopedStudents.map((item) => Number(item.id)));
+    const scopedRooms = scoped ? (rooms as any[]).filter((item) => String(item.name ?? "").trim().toLowerCase() === room) : rooms as any[];
+    const scopedAttendance = scoped ? (attendance as any[]).filter((item) => String(item.room ?? "").trim().toLowerCase() === room && scopedStudentIds.has(Number(item.student_id))) : attendance as any[];
+    const scopedExams = scoped ? (exams as any[]).filter((item) => String(item.room ?? "").trim().toLowerCase() === room) : exams as any[];
+    const scopedExamIds = new Set(scopedExams.map((item) => Number(item.id)));
+    const scopedScores = scoped ? (scores as any[]).filter((item) => scopedExamIds.has(Number(item.exam_id)) && scopedStudentIds.has(Number(item.student_id))) : scores as any[];
     const financialCategories = (categories as any[]).reduce(
       (acc, category) => {
         if (category.type === "entrada" || category.type === "saida") acc[category.type].push(category.name);
@@ -147,14 +157,14 @@ export default async (_req: Request, _context: Context) => {
     );
 
     return jsonResponse({
-      students: (students as any[]).map(studentFromRow),
-      rooms: (rooms as any[]).map(roomFromRow),
-      pendingEnrollments: (pending as any[]).map(pendingFromRow),
-      team: (team as any[]).map(teamFromRow),
+      students: scopedStudents.map(studentFromRow),
+      rooms: scopedRooms.map(roomFromRow),
+      pendingEnrollments: scoped ? [] : (pending as any[]).map(pendingFromRow),
+      team: scoped ? (team as any[]).filter((item) => Number(item.id) === session.sub).map(teamFromRow) : (team as any[]).map(teamFromRow),
       financialCategories,
       financialEntries: (entries as any[]).map(entryFromRow),
-      exams: (exams as any[]).map((exam) => examFromRow(exam, scores as any[])),
-      attendanceRecords: (attendance as any[]).map(attendanceFromRow),
+      exams: scopedExams.map((exam) => examFromRow(exam, scopedScores)),
+      attendanceRecords: scopedAttendance.map(attendanceFromRow),
       settings: settingsValue
     });
   } catch (error) {
@@ -163,7 +173,7 @@ export default async (_req: Request, _context: Context) => {
         ok: false,
         message: error instanceof Error ? error.message : "Erro ao carregar dados do Neon."
       },
-      { status: 500 }
+      { status: error instanceof AuthError ? error.status : 500 }
     );
   }
 };

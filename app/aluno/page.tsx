@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, BookOpenCheck, Camera, Check, DollarSign, ExternalLink, FileText, MessageCircle, MoreHorizontal, Search, Send, Sparkles, Trash2, Upload, UserRoundPlus } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { fetchNeonJson, isNeonProvider } from "@/lib/data-provider";
-import { listenForForegroundPush, registerStudentPushToken } from "@/lib/firebase-client";
+import { listenForForegroundPush, registerEbrServiceWorker, registerStudentPushToken } from "@/lib/firebase-client";
 
 type Student = {
   id: number;
@@ -425,6 +425,7 @@ export default function StudentPortalPage() {
     if (typeof window === "undefined") return;
     const section = new URLSearchParams(window.location.search).get("section");
     if (section === "contents" || section === "library" || section === "talk" || section === "ministry") setMobileSection(section);
+    void registerEbrServiceWorker().catch(() => undefined);
   }, []);
 
   useEffect(() => {

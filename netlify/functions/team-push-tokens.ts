@@ -1,14 +1,17 @@
 import type { Config, Context } from "@netlify/functions";
 import { getNeonSql, jsonResponse } from "./_shared/neon";
+import { AuthError, requireManagementSession } from "./_shared/auth";
 
 type TokenBody = { membroId?: number; token?: string; plataforma?: string };
 
 export default async (req: Request, _context: Context) => {
   if (req.method !== "POST" && req.method !== "DELETE") return jsonResponse({ message: "Método não permitido." }, { status: 405 });
   try {
+    const session = requireManagementSession(req);
     const body = (await req.json()) as TokenBody;
     const membroId = Number(body.membroId ?? 0);
     const token = String(body.token ?? "").trim();
+    if (session.sub !== membroId) throw new AuthError("Você só pode registrar o próprio dispositivo.", 403);
     if (!membroId || token.length < 20 || token.length > 4096) return jsonResponse({ message: "Membro ou token inválido." }, { status: 400 });
     const sql = getNeonSql();
     const members = await sql`select id from team_members where id = ${membroId} limit 1`;
@@ -26,7 +29,8 @@ export default async (req: Request, _context: Context) => {
     `;
     return jsonResponse({ ok: true, data: rows[0] });
   } catch (error) {
-    return jsonResponse({ ok: false, message: error instanceof Error ? error.message : "Erro ao salvar token da equipe." }, { status: 500 });
+    const status = error instanceof AuthError ? error.status : 500;
+    return jsonResponse({ ok: false, message: error instanceof Error ? error.message : "Erro ao salvar token da equipe." }, { status });
   }
 };
 

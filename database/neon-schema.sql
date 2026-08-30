@@ -224,10 +224,28 @@ create table if not exists notificacoes (
   lida_em timestamptz
 );
 
+
+create table if not exists birthday_push_deliveries (
+  delivery_date date not null,
+  token_id bigint not null references equipe_push_tokens(id) on delete cascade,
+  sent_at timestamptz not null default now(),
+  primary key (delivery_date, token_id)
+);
+
+create table if not exists birthday_push_attempts (
+  id bigserial primary key,
+  delivery_date date not null,
+  token_id bigint not null references equipe_push_tokens(id) on delete cascade,
+  status text not null check (status in ('sent', 'failed')),
+  error_code text not null default '',
+  message_id text not null default '',
+  attempted_at timestamptz not null default now()
+);
 create index if not exists idx_aluno_push_tokens_aluno_ativo on aluno_push_tokens(aluno_id, ativo);
 create index if not exists idx_equipe_push_tokens_membro_ativo on equipe_push_tokens(membro_id, ativo);
 create index if not exists idx_notificacoes_aluno_criado on notificacoes(aluno_id, criado_em desc);
 create index if not exists idx_notificacoes_aluno_nao_lida on notificacoes(aluno_id, lida) where lida = false;
+create index if not exists idx_birthday_push_attempts_delivery on birthday_push_attempts(delivery_date desc, attempted_at desc);
 
 create index if not exists idx_students_room on students(room);
 create index if not exists idx_attendance_room_date on attendance_records(room, attendance_date);

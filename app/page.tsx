@@ -58,7 +58,7 @@ import type { LucideIcon } from "lucide-react";
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import { fetchNeonJson, isNeonProvider } from "@/lib/data-provider";
-import { registerTeamPushToken } from "@/lib/firebase-client";
+import { listenForForegroundPush, registerEbrServiceWorker, registerTeamPushToken } from "@/lib/firebase-client";
 
 type ViewKey =
   | "dashboard"
@@ -1752,10 +1752,32 @@ function PageShell({
     void registerTeamPushToken(user.id);
   }, [user.id]);
 
+  useEffect(() => {
+    let active = true;
+    let stop: () => void = () => undefined;
+    void listenForForegroundPush((payload) => {
+      if (active) setTeamPushFeedback(`${payload.title}: ${payload.message}`);
+    }).then((unsubscribe) => { stop = unsubscribe; });
+    return () => {
+      active = false;
+      stop();
+    };
+  }, []);
+
   async function activateTeamNotifications() {
     setTeamPushFeedback("Ativando notificações...");
     const result = await registerTeamPushToken(user.id);
-    setTeamPushFeedback(result.message);
+    if (!result.enabled) {
+      setTeamPushFeedback(result.message);
+      return;
+    }
+    setTeamPushFeedback("Notificações ativadas. Enviando teste...");
+    try {
+      const test = await fetchNeonJson<{ sent: number; failed: number; message: string }>("/api/push/team-test", { method: "POST" });
+      setTeamPushFeedback(test.message);
+    } catch (error) {
+      setTeamPushFeedback(error instanceof Error ? error.message : "Notificações ativadas, mas o teste não pôde ser enviado.");
+    }
   }
 
   function logoutWithPushCleanup() {
@@ -5997,7 +6019,7 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
-    if (typeof window !== "undefined" && "serviceWorker" in navigator) void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+    void registerEbrServiceWorker().catch(() => undefined);
     let savedSession: ManagementSession = {} as ManagementSession;
     try { savedSession = JSON.parse(sessionStorage.getItem(EBR_SESSION_STORAGE_KEY) ?? "{}") as ManagementSession; } catch { sessionStorage.removeItem(EBR_SESSION_STORAGE_KEY); }
     if (isNeonProvider && !savedSession.token) { setDataLoading(false); setDataReady(true); return () => { active = false; }; }

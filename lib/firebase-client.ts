@@ -6,6 +6,15 @@ import { deleteToken, getMessaging, getToken, isSupported, onMessage } from "fir
 const PUSH_TOKEN_STORAGE_KEY = "ebr-fcm-token";
 const TEAM_PUSH_TOKEN_STORAGE_KEY = "ebr-fcm-team-token";
 
+function managementAuthorizationHeader(): Record<string, string> {
+  try {
+    const session = JSON.parse(sessionStorage.getItem("ebr-session") ?? "{}") as { token?: string };
+    return session.token ? { Authorization: `Bearer ${session.token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
 function firebaseConfig() {
   return {
     apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "",
@@ -24,7 +33,33 @@ function firebaseConfigured() {
 
 function serviceWorkerUrl() {
   const params = new URLSearchParams(firebaseConfig());
-  return `/firebase-messaging-sw.js?${params.toString()}`;
+  return `/sw.js?${params.toString()}`;
+}
+
+export async function registerEbrServiceWorker() {
+  if (typeof window === "undefined" || !("serviceWorker" in navigator) || !window.isSecureContext) return null;
+  return navigator.serviceWorker.register(serviceWorkerUrl(), { scope: "/", updateViaCache: "none" });
+}
+
+async function activeEbrServiceWorker() {
+  const registration = await registerEbrServiceWorker();
+  if (!registration) return null;
+  const pendingWorker = registration.installing ?? registration.waiting;
+  if (pendingWorker && pendingWorker.state !== "activated") {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error("O serviço de notificações demorou para atualizar.")), 15000);
+      pendingWorker.addEventListener("statechange", () => {
+        if (pendingWorker.state === "activated") {
+          window.clearTimeout(timeout);
+          resolve();
+        } else if (pendingWorker.state === "redundant") {
+          window.clearTimeout(timeout);
+          reject(new Error("Não foi possível atualizar o serviço de notificações."));
+        }
+      });
+    });
+  }
+  return navigator.serviceWorker.ready;
 }
 
 function isIosBrowser() {
@@ -76,8 +111,8 @@ export async function registerStudentPushToken(alunoId: number): Promise<PushReg
     const messaging = await browserMessaging();
     if (!messaging) return { enabled: false, reason: "unsupported", message: "Este navegador não é compatível com as notificações do EBR." };
 
-    const registration = await navigator.serviceWorker.register(serviceWorkerUrl(), { scope: "/", updateViaCache: "none" });
-    await navigator.serviceWorker.ready;
+    const registration = await activeEbrServiceWorker();
+    if (!registration) return { enabled: false, reason: "unsupported", message: "Este navegador não oferece notificações push." };
     const token = await getToken(messaging, {
       vapidKey: process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY,
       serviceWorkerRegistration: registration
@@ -116,13 +151,13 @@ export async function registerTeamPushToken(membroId: number): Promise<PushRegis
     if (permission !== "granted") return { enabled: false, reason: "denied", message: "Permita as notificações nas configurações do navegador." };
     const messaging = await browserMessaging();
     if (!messaging) return { enabled: false, reason: "unsupported", message: "Este navegador não é compatível com as notificações do EBR." };
-    const registration = await navigator.serviceWorker.register(serviceWorkerUrl(), { scope: "/", updateViaCache: "none" });
-    await navigator.serviceWorker.ready;
+    const registration = await activeEbrServiceWorker();
+    if (!registration) return { enabled: false, reason: "unsupported", message: "Este navegador não oferece notificações push." };
     const token = await getToken(messaging, { vapidKey: process.env.NEXT_PUBLIC_FIREBASE_VAPID_KEY, serviceWorkerRegistration: registration });
     if (!token) return { enabled: false, reason: "error", message: "Não foi possível identificar este dispositivo." };
     const response = await fetch("/api/push/team-tokens", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...managementAuthorizationHeader() },
       body: JSON.stringify({ membroId, token, plataforma: isIosBrowser() ? "ios-web" : "web" })
     });
     if (!response.ok) throw new Error("Falha ao registrar o dispositivo da equipe.");
@@ -140,7 +175,7 @@ export async function deactivateTeamPushToken(membroId: number) {
   if (token) {
     await fetch("/api/push/team-tokens", {
       method: "DELETE",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...managementAuthorizationHeader() },
       body: JSON.stringify({ membroId, token })
     }).catch(() => undefined);
   }

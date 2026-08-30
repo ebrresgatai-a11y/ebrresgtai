@@ -13,7 +13,7 @@ const sql = neon(databaseUrl);
 
 for (const statement of statements) await sql.query(statement);
 
-const tables = await sql.query("select table_name from information_schema.tables where table_schema = 'public' and table_name in ('aluno_push_tokens', 'birthday_push_deliveries', 'equipe_push_tokens', 'notificacoes') order by table_name");
+const tables = await sql.query("select table_name from information_schema.tables where table_schema = 'public' and table_name in ('aluno_push_tokens', 'birthday_push_attempts', 'birthday_push_deliveries', 'equipe_push_tokens', 'notificacoes') order by table_name");
 console.log("Migração FCM aplicada:", tables.map((row) => row.table_name).join(", "));
 process.exit(0);
 

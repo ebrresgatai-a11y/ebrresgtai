@@ -255,6 +255,9 @@ const navItems: Array<{ key: ViewKey; label: string; icon: LucideIcon; roles: Ro
   { key: "settings", label: "Configurações", icon: Settings, roles: ["admin"] }
 ];
 
+const DEFAULT_BIRTHDAY_MESSAGE = "Parabéns, {nome}! A EBR deseja um dia muito abençoado para você.";
+const BIRTHDAY_MESSAGE_STORAGE_KEY = "ebr-birthday-message";
+
 const demoUsers: AppUser[] = [
   { id: 1, name: "Pr. Renato", username: "admin", email: "admin@ebd.com", role: "admin", avatar: "PR" },
   { id: 2, name: "Larissa Melo", username: "professor", email: "professor@ebd.com", role: "teacher", avatar: "LM", room: "Adolescentes" }
@@ -868,6 +871,7 @@ function calculateAge(birthday: string) {
 }
 
 function isBirthdayToday(birthday: string) {
+  if (birthday === "Hoje") return true;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(birthday)) return false;
   const [, month, day] = birthday.split("-").map(Number);
   const today = new Date();
@@ -1979,11 +1983,20 @@ function Section({ children }: { children: ReactNode }) {
   );
 }
 
-function MetricCard({ title, value, subtitle, icon, chart, tone }: { title: string; value: string; subtitle?: string; icon: ReactNode; chart: ReactNode; tone: string }) {
+function MetricCard({ title, value, subtitle, icon, chart, tone, onClick }: { title: string; value: string; subtitle?: string; icon: ReactNode; chart: ReactNode; tone: string; onClick?: () => void }) {
   return (
     <motion.div
       whileHover={{ y: -4 }}
-      className="glass-panel overflow-hidden rounded-[1.6rem] p-5 shadow-soft"
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      onClick={onClick}
+      onKeyDown={(event) => {
+        if (onClick && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onClick();
+        }
+      }}
+      className={`glass-panel overflow-hidden rounded-[1.6rem] p-5 shadow-soft ${onClick ? "cursor-pointer transition hover:ring-2 hover:ring-brand-gold/60 focus:outline-none focus:ring-2 focus:ring-brand-gold" : ""}`}
     >
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -2016,18 +2029,20 @@ function BirthdayTodayPreview({ students }: { students: Student[] }) {
   if (!students.length) return <p className="flex h-full items-center text-xs font-bold text-slate-400">Nenhum aniversariante hoje</p>;
   const first = students[0];
   return (
-    <div className="flex h-full min-w-0 items-center gap-2">
-      <Avatar initials={first.avatar} photo={first.photo} size="sm" index={2} />
+    <div className="flex h-full min-w-0 items-center gap-2 rounded-2xl bg-amber-50/80 px-2 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:ring-amber-400/30">
+      <div className="rounded-full bg-amber-300 p-0.5 dark:bg-amber-400">
+        <Avatar initials={first.avatar} photo={first.photo} size="sm" index={2} />
+      </div>
       <div className="min-w-0 flex-1">
         <p className="truncate text-sm font-extrabold text-brand-deep dark:text-white">{first.name}</p>
-        <p className="truncate text-xs font-bold text-slate-500 dark:text-slate-400">{first.room}</p>
+        <p className="truncate text-xs font-extrabold text-amber-700 dark:text-amber-200">É hoje · {first.room}</p>
       </div>
       {students.length > 1 ? <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-extrabold text-amber-800 dark:bg-amber-500/15 dark:text-amber-200">+{students.length - 1}</span> : null}
     </div>
   );
 }
 
-function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }: { user: AppUser; studentsSource: Student[]; roomsSource: Room[]; attendanceRecords: AttendanceRecord[] }) {
+function DashboardView({ user, studentsSource, roomsSource, attendanceRecords, onOpenBirthdays }: { user: AppUser; studentsSource: Student[]; roomsSource: Room[]; attendanceRecords: AttendanceRecord[]; onOpenBirthdays: () => void }) {
   const scopedStudents = scopeStudentsForUser(user, studentsSource);
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
   const scopedRoomNames = new Set(scopedRooms.map((room) => room.name));
@@ -2052,7 +2067,7 @@ function DashboardView({ user, studentsSource, roomsSource, attendanceRecords }:
         <MetricCard title="Total de alunos" value={String(scopedStudents.length)} subtitle={`visao ${scopeLabel}`} icon={<Users className="h-5 w-5 text-white" />} tone="bg-brand-deep" chart={<TinyArea color="#3B82F6" />} />
         <MetricCard title="Presentes hoje" value={String(todayPresenceCount).padStart(2, "0")} subtitle="última chamada do dia" icon={<Check className="h-5 w-5 text-white" />} tone="bg-brand-green" chart={<TinyArea color="#22C55E" />} />
         <MetricCard title="Presença média" value={`${averagePresence}%`} subtitle={user.role === "teacher" ? "somente sua sala" : "+6% vs. mês anterior"} icon={<Check className="h-5 w-5 text-white" />} tone="bg-brand-green" chart={<TinyArea color="#22C55E" />} />
-        <MetricCard title="Aniversariantes do dia" value={String(birthdaysToday).padStart(2, "0")} subtitle="celebrações hoje" icon={<CalendarDays className="h-5 w-5 text-white" />} tone="bg-brand-gold" chart={<BirthdayTodayPreview students={birthdayStudentsToday} />} />
+        <MetricCard title="Aniversariantes do dia" value={String(birthdaysToday).padStart(2, "0")} subtitle="clique para ver quem faz aniversário hoje" icon={<CalendarDays className="h-5 w-5 text-white" />} tone="bg-brand-gold" chart={<BirthdayTodayPreview students={birthdayStudentsToday} />} onClick={onOpenBirthdays} />
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[1.35fr_0.95fr]">
@@ -3792,14 +3807,31 @@ function HighlightStudentsCard({ title, subtitle, tone, students, emptyText }: {
   );
 }
 
-function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsSource }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; roomsSource: Room[]; studentsSource: Student[] }) {
+function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsSource, todayOnly = false }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; roomsSource: Room[]; studentsSource: Student[]; todayOnly?: boolean }) {
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
   const scopedStudents = scopeStudentsForUser(user, studentsSource);
   const [birthdayMonth, setBirthdayMonth] = useState(getCurrentMonth());
-  const [birthdayMessage, setBirthdayMessage] = useState("Parabéns, {nome}! A EBR deseja um dia muito abençoado para você.");
+  const [birthdayMessage, setBirthdayMessage] = useState(DEFAULT_BIRTHDAY_MESSAGE);
+  useEffect(() => {
+    try {
+      const savedMessage = window.localStorage.getItem(BIRTHDAY_MESSAGE_STORAGE_KEY);
+      if (savedMessage !== null) setBirthdayMessage(savedMessage);
+    } catch {
+      // O formulário continua funcionando mesmo quando o navegador bloqueia o armazenamento local.
+    }
+  }, []);
+
+  function updateBirthdayMessage(value: string) {
+    setBirthdayMessage(value);
+    try {
+      window.localStorage.setItem(BIRTHDAY_MESSAGE_STORAGE_KEY, value);
+    } catch {
+      // A mensagem permanece em memória nesta sessão quando o armazenamento não está disponível.
+    }
+  }
   const [room, setRoom] = useState(user.role === "teacher" ? scopedRooms[0]?.name ?? "Todas" : "Todas");
   const birthdayStudents = scopedStudents.filter((student) => {
-    const matchesPeriod = getBirthdayMonth(student) === birthdayMonth;
+    const matchesPeriod = todayOnly ? isBirthdayToday(student.birthday) : getBirthdayMonth(student) === birthdayMonth;
     const matchesRoom = user.role === "teacher" || room === "Todas" || sameRoomName(student.room, room);
     const search = searchTerm.toLowerCase().trim();
     const matchesQuery = !search || student.name.toLowerCase().includes(search) || student.ra.toLowerCase().includes(search) || student.room.toLowerCase().includes(search);
@@ -3827,9 +3859,9 @@ function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsS
         </div>
       </div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <select value={birthdayMonth} onChange={(event) => setBirthdayMonth(Number(event.target.value))} className="rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none shadow-sm dark:border-slate-700 dark:bg-slate-900">
+        {todayOnly ? <span className="rounded-full bg-amber-100 px-4 py-3 text-sm font-extrabold text-amber-800 dark:bg-amber-500/15 dark:text-amber-200">Aniversariantes de hoje</span> : <select value={birthdayMonth} onChange={(event) => setBirthdayMonth(Number(event.target.value))} className="rounded-full border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none shadow-sm dark:border-slate-700 dark:bg-slate-900">
           {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
-        </select>
+        </select>}
         <div className="flex flex-col gap-2 sm:flex-row">
           <label className="flex items-center rounded-full border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-700 dark:bg-slate-900">
             <Search className="mr-2 h-4 w-4 text-slate-400" />
@@ -3842,15 +3874,15 @@ function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsS
         </div>
       </div>
       <label className="block rounded-[1.6rem] bg-white p-4 shadow-sm dark:bg-slate-900">
-        <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Mensagem de parabens</span>
-        <textarea value={birthdayMessage} onChange={(event) => setBirthdayMessage(event.target.value)} className="mt-2 min-h-24 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-brand-blue dark:border-slate-700 dark:bg-slate-800" />
+        <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Mensagem de parabéns <span className="font-semibold text-slate-400">· salva automaticamente</span></span>
+        <textarea value={birthdayMessage} onChange={(event) => updateBirthdayMessage(event.target.value)} className="mt-2 min-h-24 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none focus:border-brand-blue dark:border-slate-700 dark:bg-slate-800" />
       </label>
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         {birthdayStudents.map((student, index) => (
-          <motion.div key={student.id} whileHover={{ y: -4 }} className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
+          <motion.div key={student.id} whileHover={{ y: -4 }} className={`rounded-[1.8rem] p-5 shadow-soft ${isBirthdayToday(student.birthday) ? "border-2 border-amber-300 bg-amber-50/80 shadow-amber-200/60 dark:border-amber-400/60 dark:bg-amber-500/10 dark:shadow-amber-950/40" : "glass-panel"}`}>
             <div className="flex items-start justify-between">
               <Avatar initials={student.avatar} photo={student.photo} size="xl" index={index} />
-              <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-extrabold text-amber-800 dark:bg-amber-500/15 dark:text-amber-200">{formatBirthdayLabel(student.birthday)}</span>
+              <span className={`rounded-full px-3 py-1 text-xs font-extrabold ${isBirthdayToday(student.birthday) ? "bg-brand-gold text-white" : "bg-amber-100 text-amber-800 dark:bg-amber-500/15 dark:text-amber-200"}`}>{isBirthdayToday(student.birthday) ? "É hoje!" : formatBirthdayLabel(student.birthday)}</span>
             </div>
             <h3 className="mt-5 text-xl font-extrabold text-brand-deep dark:text-white">{student.name}</h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{calculateAge(student.birthday) || student.age} anos - {student.room}</p>
@@ -5948,6 +5980,7 @@ function getStoredActiveView(): ViewKey {
 
 export default function Home() {
   const [activeView, setActiveView] = useState<ViewKey>(getStoredActiveView);
+  const [birthdaysTodayOnly, setBirthdaysTodayOnly] = useState(false);
   const [searchTerms, setSearchTerms] = useState<Partial<Record<ViewKey, string>>>({});
   const [studentList, setStudentList] = useState<Student[]>(initialEbrData.students);
   const [roomList, setRoomList] = useState<Room[]>(initialEbrData.rooms);
@@ -6151,8 +6184,16 @@ export default function Home() {
 
   function changeView(view: ViewKey) {
     setFollowUpFilterActive(false);
+    setBirthdaysTodayOnly(false);
     setSearchTerms((current) => ({ ...current, [activeView]: "" }));
     setActiveView(view);
+  }
+
+  function openTodayBirthdays() {
+    setFollowUpFilterActive(false);
+    setBirthdaysTodayOnly(true);
+    setSearchTerms((current) => ({ ...current, [activeView]: "", birthdays: "" }));
+    setActiveView("birthdays");
   }
 
   function openAbsenceFollowUps() {
@@ -6168,13 +6209,13 @@ export default function Home() {
   }
 
   const views: Record<ViewKey, ReactNode> = {
-    dashboard: <DashboardView user={user} studentsSource={studentList} roomsSource={roomList} attendanceRecords={attendanceRecords} />,
+    dashboard: <DashboardView user={user} studentsSource={studentList} roomsSource={roomList} attendanceRecords={attendanceRecords} onOpenBirthdays={openTodayBirthdays} />,
     students: <StudentsView user={user} searchTerm={searchTerms.students ?? ""} setSearchTerm={(value) => setSearchForView("students", value)} studentList={studentList} setStudentList={setStudentList} pendingList={pendingList} setPendingList={setPendingList} roomList={roomList} followUpFilterActive={followUpFilterActive} followUpStudents={followUpStudents} onClearFollowUpFilter={() => setFollowUpFilterActive(false)} onResolveFollowUp={resolveAbsenceFollowUp} />,
     rooms: <RoomsView user={user} searchTerm={searchTerms.rooms ?? ""} setSearchTerm={(value) => setSearchForView("rooms", value)} roomList={roomList} setRoomList={setRoomList} team={team} setTeam={setTeam} studentsSource={studentList} attendanceRecords={attendanceRecords} onOpenRoomStudents={openRoomStudents} />,
     attendance: <AttendanceView user={user} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} setAttendanceRecords={setAttendanceRecords} setStudents={setStudentList} />,
     exams: <ExamsView user={user} exams={examList} setExams={setExamList} roomsSource={roomList} studentsSource={studentList} />,
     ranking: <RankingView user={user} searchTerm={searchTerms.ranking ?? ""} setSearchTerm={(value) => setSearchForView("ranking", value)} exams={examList} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} />,
-    birthdays: <BirthdaysView user={user} searchTerm={searchTerms.birthdays ?? ""} setSearchTerm={(value) => setSearchForView("birthdays", value)} roomsSource={roomList} studentsSource={studentList} />,
+    birthdays: <BirthdaysView user={user} searchTerm={searchTerms.birthdays ?? ""} setSearchTerm={(value) => setSearchForView("birthdays", value)} roomsSource={roomList} studentsSource={studentList} todayOnly={birthdaysTodayOnly} />,
     finance: <FinanceView categories={financialCategories} setCategories={setFinancialCategories} entries={financialEntries} setEntries={setFinancialEntries} readOnly={user.role !== "admin"} />,
     studentPortal: <StudentPortalAdminView user={user} roomsSource={roomList} settings={settings} setSettings={setSettings} />,
     schedule: <TeacherScheduleView user={user} team={team} settings={settings} setSettings={setSettings} />,

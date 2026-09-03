@@ -97,7 +97,7 @@ type Student = {
   phone: string;
   room: string;
   frequency: number;
-  status: "Ativo" | "Acompanhar" | "Novo";
+  status: "Ativo" | "Acompanhar" | "Novo" | "Inativo";
   birthday: string;
   age: number;
   avatar: string;
@@ -920,6 +920,14 @@ function scopeStudentsForUser(user: AppUser, source = students) {
   return teacherRoom ? source.filter((student) => sameRoomName(student.room, teacherRoom)) : source;
 }
 
+function isStudentActive(student: Pick<Student, "status">) {
+  return String(student.status).trim().toLowerCase() !== "inativo";
+}
+
+function scopeActiveStudentsForUser(user: AppUser, source = students) {
+  return scopeStudentsForUser(user, source).filter(isStudentActive);
+}
+
 function scopeRoomsForUser(user: AppUser, source = rooms) {
   const teacherRoom = getTeacherRoom(user);
   return teacherRoom ? source.filter((room) => sameRoomName(room.name, teacherRoom)) : source;
@@ -1006,8 +1014,9 @@ function getRankingScore(student: Student, exams = initialExams) {
 }
 
 function getRoomAttendanceStats(roomName: string, studentsSource: Student[], attendanceRecords: AttendanceRecord[]) {
-  const studentCount = studentsSource.filter((student) => sameRoomName(student.room, roomName)).length;
-  const records = attendanceRecords.filter((record) => sameRoomName(record.room, roomName));
+  const activeStudentIds = new Set(studentsSource.filter(isStudentActive).map((student) => Number(student.id)));
+  const studentCount = studentsSource.filter((student) => activeStudentIds.has(Number(student.id)) && sameRoomName(student.room, roomName)).length;
+  const records = attendanceRecords.filter((record) => activeStudentIds.has(Number(record.studentId)) && sameRoomName(record.room, roomName));
   const presentCount = records.filter((record) => record.present).length;
   const avg = records.length ? Math.round((presentCount / records.length) * 100) : 0;
   return { studentCount, avg, presentCount, recordsCount: records.length };
@@ -1140,7 +1149,7 @@ function getConsecutiveAbsenceInfo(user: AppUser, student: Student, attendanceRe
 }
 
 function getStudentsWithConsecutiveAbsences(user: AppUser, studentsSource: Student[], attendanceRecords: AttendanceRecord[], resolutions: AbsenceFollowUpResolutions = {}) {
-  return scopeStudentsForUser(user, studentsSource).filter((student) => Boolean(getConsecutiveAbsenceInfo(user, student, attendanceRecords, resolutions)));
+  return scopeActiveStudentsForUser(user, studentsSource).filter((student) => Boolean(getConsecutiveAbsenceInfo(user, student, attendanceRecords, resolutions)));
 }
 
 function getBirthdayMonth(student: Student) {
@@ -1417,7 +1426,8 @@ function StatusBadge({ status }: { status: Student["status"] }) {
   const styles = {
     Ativo: "bg-emerald-50 text-emerald-700 ring-emerald-100 dark:bg-emerald-500/12 dark:text-emerald-300 dark:ring-emerald-500/20",
     Acompanhar: "bg-red-50 text-red-700 ring-red-100 dark:bg-red-500/12 dark:text-red-300 dark:ring-red-500/20",
-    Novo: "bg-blue-50 text-blue-700 ring-blue-100 dark:bg-blue-500/12 dark:text-blue-300 dark:ring-blue-500/20"
+    Novo: "bg-blue-50 text-blue-700 ring-blue-100 dark:bg-blue-500/12 dark:text-blue-300 dark:ring-blue-500/20",
+    Inativo: "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700"
   };
 
   return <span className={`rounded-full px-3 py-1 text-xs font-semibold ring-1 ${styles[status]}`}>{status}</span>;
@@ -2043,19 +2053,20 @@ function BirthdayTodayPreview({ students }: { students: Student[] }) {
 }
 
 function DashboardView({ user, studentsSource, roomsSource, attendanceRecords, onOpenBirthdays }: { user: AppUser; studentsSource: Student[]; roomsSource: Room[]; attendanceRecords: AttendanceRecord[]; onOpenBirthdays: () => void }) {
-  const scopedStudents = scopeStudentsForUser(user, studentsSource);
+  const scopedStudents = scopeActiveStudentsForUser(user, studentsSource);
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
   const scopedRoomNames = new Set(scopedRooms.map((room) => room.name));
-  const scopedAttendanceRecords = attendanceRecords.filter((record) => Array.from(scopedRoomNames).some((roomName) => sameRoomName(roomName, record.room)));
-  const scopedRoomFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(attendanceRecords, 0, room.name) }));
-  const scopedThursdayFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(attendanceRecords, 4, room.name) }));
-  const monthlyPresenceData = buildMonthlyPresenceData(attendanceRecords, scopedRooms);
+  const activeStudentIds = new Set(scopedStudents.map((student) => Number(student.id)));
+  const scopedAttendanceRecords = attendanceRecords.filter((record) => activeStudentIds.has(Number(record.studentId)) && Array.from(scopedRoomNames).some((roomName) => sameRoomName(roomName, record.room)));
+  const scopedRoomFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(scopedAttendanceRecords, 0, room.name) }));
+  const scopedThursdayFrequency = scopedRooms.map((room) => ({ name: room.name, media: getAveragePresentByWeekday(scopedAttendanceRecords, 4, room.name) }));
+  const monthlyPresenceData = buildMonthlyPresenceData(scopedAttendanceRecords, scopedRooms);
   const averagePresence = scopedAttendanceRecords.length
     ? Math.round((scopedAttendanceRecords.filter((record) => record.present).length / scopedAttendanceRecords.length) * 100)
     : 0;
   const birthdayStudentsToday = scopedStudents.filter((student) => isBirthdayToday(student.birthday));
   const birthdaysToday = birthdayStudentsToday.length;
-  const todayPresenceCount = attendanceRecords.filter((record) => {
+  const todayPresenceCount = scopedAttendanceRecords.filter((record) => {
     const inUserScope = user.role === "admin" || sameRoomName(record.room, getTeacherRoom(user));
     return record.attendanceDate === getTodayInputDate() && record.present && inUserScope;
   }).length;
@@ -2188,6 +2199,7 @@ function StudentsView({
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [studentFeedback, setStudentFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [updatingStudentIds, setUpdatingStudentIds] = useState<Record<number, boolean>>({});
   const visibleStudents = scopeStudentsForUser(user, studentList);
   const visibleRooms = scopeRoomsForUser(user, roomList);
   const followUpIds = useMemo(() => new Set(followUpStudents.map((student) => Number(student.id))), [followUpStudents]);
@@ -2259,6 +2271,30 @@ function StudentsView({
     setEditingStudent(null);
     setStudentFeedback({ kind: "success", message: "Aluno atualizado." });
     return true;
+  }
+
+  async function toggleStudentActivity(student: Student) {
+    if (updatingStudentIds[student.id]) return;
+    const nextStatus: Student["status"] = isStudentActive(student) ? "Inativo" : "Ativo";
+    const previousStudent = student;
+    const updatedStudent = { ...student, status: nextStatus };
+    setUpdatingStudentIds((current) => ({ ...current, [student.id]: true }));
+    setStudentList((current) => current.map((item) => (item.id === student.id ? updatedStudent : item)));
+    try {
+      if (isNeonProvider) {
+        const data = await neonMutate<Student>("student", "update", updatedStudent, student.id);
+        if (data) setStudentList((current) => current.map((item) => (item.id === student.id ? data : item)));
+      } else if (supabase) {
+        const { error } = await supabase.from("students").update({ status: nextStatus }).eq("id", student.id);
+        if (error) throw error;
+      }
+      setStudentFeedback({ kind: "success", message: `${student.name} foi ${nextStatus === "Inativo" ? "inativado" : "reativado"}.` });
+    } catch (error) {
+      setStudentList((current) => current.map((item) => (item.id === student.id ? previousStudent : item)));
+      setStudentFeedback({ kind: "error", message: error instanceof Error ? error.message : "Não foi possível atualizar o status do aluno." });
+    } finally {
+      setUpdatingStudentIds((current) => ({ ...current, [student.id]: false }));
+    }
   }
 
   async function openStudentDetails(student: Student) {
@@ -2373,11 +2409,14 @@ function StudentsView({
             </thead>
             <tbody>
               {filtered.map((student, index) => (
-                <motion.tr key={student.id} layout className="rounded-2xl bg-white shadow-sm dark:bg-slate-900/80">
+                <motion.tr key={student.id} layout className={`rounded-2xl bg-white shadow-sm dark:bg-slate-900/80 ${!isStudentActive(student) ? "opacity-75" : ""}`}>
                   <td className="rounded-l-2xl px-4 py-3">
                     <button type="button" onClick={() => void openStudentDetails(student)} className="flex items-center gap-3 text-left">
                       <Avatar initials={student.avatar} photo={student.photo} index={index} />
-                      <span className="font-bold text-slate-800 underline-offset-4 hover:underline dark:text-white">{student.name}</span>
+                      <span className="min-w-0">
+                        <span className="block font-bold text-slate-800 underline-offset-4 hover:underline dark:text-white">{student.name}</span>
+                        <span className="mt-1 block"><StatusBadge status={student.status} /></span>
+                      </span>
                     </button>
                   </td>
                   <td className="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
@@ -2391,6 +2430,10 @@ function StudentsView({
                       {followUpFilterActive && followUpIds.has(Number(student.id)) ? (
                         <button type="button" onClick={() => void onResolveFollowUp(student)} className="rounded-full bg-emerald-50 px-3 py-2 text-xs font-extrabold text-emerald-700 ring-1 ring-emerald-100 transition hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-200 dark:ring-emerald-500/20">Resolvido</button>
                       ) : null}
+                      <button type="button" disabled={Boolean(updatingStudentIds[student.id])} onClick={() => void toggleStudentActivity(student)} className={`inline-flex items-center gap-1 rounded-full px-3 py-2 text-xs font-extrabold transition disabled:cursor-wait disabled:opacity-60 ${isStudentActive(student) ? "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-200"}`}>
+                        {isStudentActive(student) ? <XCircle className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                        {isStudentActive(student) ? "Inativar" : "Ativar"}
+                      </button>
                       <IconButton label={`Editar ${student.name}`} onClick={() => void openStudentEditor(student)}>
                         <Pencil className="h-4 w-4" />
                       </IconButton>
@@ -2562,6 +2605,7 @@ function StudentModal({
               <option>Ativo</option>
               <option>Acompanhar</option>
               <option>Novo</option>
+              <option>Inativo</option>
             </select>
           </label>
         </div>
@@ -2649,7 +2693,7 @@ function RoomsView({
   const [planningRoom, setPlanningRoom] = useState<Room | null>(null);
   const [inlinePlanning, setInlinePlanning] = useState<Record<string, string>>({});
   const [inlinePlanningDate, setInlinePlanningDate] = useState<Record<string, string>>({});
-  const scopedStudents = scopeStudentsForUser(user, studentsSource);
+  const scopedStudents = scopeActiveStudentsForUser(user, studentsSource);
   const selectedRoomStats = liveRooms.find((room) => room.name === selectedRoom.name) ?? withLiveRoomStats(selectedRoom, studentsSource, attendanceRecords);
   const filteredRooms = liveRooms.filter((room) => {
     const search = searchTerm.toLowerCase().trim();
@@ -3084,7 +3128,7 @@ function AttendanceView({
   setStudents: (updater: (current: Student[]) => Student[]) => void;
 }) {
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
-  const scopedStudents = useMemo(() => scopeStudentsForUser(user, studentsSource), [user, studentsSource]);
+  const scopedStudents = useMemo(() => scopeActiveStudentsForUser(user, studentsSource), [user, studentsSource]);
   const [room, setRoom] = useState(scopedRooms[0]?.name ?? "Adolescentes");
   const attendanceDateOptions = useMemo(() => getServiceDateOptions(), []);
   const [attendanceDate, setAttendanceDate] = useState(getDefaultAttendanceDate());
@@ -3107,7 +3151,7 @@ function AttendanceView({
     () => attendanceRecords.filter((record) => normalizeStoredDate(record.attendanceDate) === attendanceDate && sameRoomName(record.room, activeRoom)),
     [attendanceDate, activeRoom, attendanceRecords]
   );
-  const [attendance, setAttendance] = useState<Record<number, boolean>>(() => Object.fromEntries(studentsSource.map((student) => [student.id, false])));
+  const [attendance, setAttendance] = useState<Record<number, boolean>>(() => Object.fromEntries(scopedStudents.map((student) => [student.id, false])));
   const presentCount = roomStudents.filter((student) => Boolean(attendance[student.id])).length;
   const absentCount = Math.max(0, roomStudents.length - presentCount);
 
@@ -3340,7 +3384,7 @@ function ExamsView({
   studentsSource: Student[];
 }) {
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
-  const scopedStudents = scopeStudentsForUser(user, studentsSource);
+  const scopedStudents = scopeActiveStudentsForUser(user, studentsSource);
   const visibleExams = exams.filter((exam) => user.role === "admin" || sameRoomName(exam.room, getTeacherRoom(user)));
   const [selectedExamId, setSelectedExamId] = useState(visibleExams[0]?.id ?? exams[0]?.id ?? 0);
   const [editingExam, setEditingExam] = useState<Exam | null>(null);
@@ -3639,9 +3683,10 @@ function ExamEditorModal({
   );
 }
 
-function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, studentsSource, attendanceRecords }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; exams: Exam[]; roomsSource: Room[]; studentsSource: Student[]; attendanceRecords: AttendanceRecord[] }) {
+function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, studentsSource, attendanceRecords, team }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; exams: Exam[]; roomsSource: Room[]; studentsSource: Student[]; attendanceRecords: AttendanceRecord[]; team: TeamMember[] }) {
   const rankingRooms = roomsSource;
-  const rankingStudents = studentsSource;
+  const teacherNames = useMemo(() => new Set(team.filter((member) => member.role === "teacher").map((member) => normalizeStudentIdentity(member.name))), [team]);
+  const rankingStudents = useMemo(() => scopeActiveStudentsForUser(user, studentsSource).filter((student) => !teacherNames.has(normalizeStudentIdentity(student.name))), [user, studentsSource, teacherNames]);
   const [room, setRoom] = useState("Todas");
   const [period, setPeriod] = useState("geral");
   const filteredRanking = useMemo(() => {
@@ -3654,13 +3699,14 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
     return base
       .map((student) => {
         const examTotal = getExamTotal(student.id, scoringExams);
+        const noteTenExams = scoringExams.filter((exam) => exam.month >= 8 && exam.month <= 12);
         return {
           ...student,
           presencePoints: student.frequency,
           examTotal,
           score: student.frequency + examTotal,
           perfectSundays: hasPerfectSundayAttendance(student, attendanceRecords),
-          scoreTen: hasExamScoreTen(student.id, scoringExams)
+          scoreTen: hasExamScoreTen(student.id, noteTenExams)
         };
       })
       .sort((a, b) => b.score - a.score)
@@ -3702,7 +3748,7 @@ function RankingView({ user, searchTerm, setSearchTerm, exams, roomsSource, stud
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         <HighlightStudentsCard title="Domingos sem falta" subtitle="Alunos presentes em todos os domingos registrados" tone="green" students={perfectSundayStudents} emptyText="Sem aluno com todos os domingos presentes neste filtro." />
-        <HighlightStudentsCard title="Nota 10" subtitle="Alunos que tiraram 10 nas provas do período" tone="gold" students={scoreTenStudents} emptyText="Sem nota 10 neste filtro." />
+        <HighlightStudentsCard title="Nota 10" subtitle="Alunos que tiraram 10 entre agosto e dezembro" tone="gold" students={scoreTenStudents} emptyText="Sem nota 10 entre agosto e dezembro neste filtro." />
       </div>
       <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft sm:p-5">
         <div className="grid grid-cols-3 items-end gap-1.5 sm:gap-3">
@@ -3809,7 +3855,7 @@ function HighlightStudentsCard({ title, subtitle, tone, students, emptyText }: {
 
 function BirthdaysView({ user, searchTerm, setSearchTerm, roomsSource, studentsSource, todayOnly = false }: { user: AppUser; searchTerm: string; setSearchTerm: (value: string) => void; roomsSource: Room[]; studentsSource: Student[]; todayOnly?: boolean }) {
   const scopedRooms = scopeRoomsForUser(user, roomsSource);
-  const scopedStudents = scopeStudentsForUser(user, studentsSource);
+  const scopedStudents = scopeActiveStudentsForUser(user, studentsSource);
   const [birthdayMonth, setBirthdayMonth] = useState(getCurrentMonth());
   const [birthdayMessage, setBirthdayMessage] = useState(DEFAULT_BIRTHDAY_MESSAGE);
   useEffect(() => {
@@ -6214,7 +6260,7 @@ export default function Home() {
     rooms: <RoomsView user={user} searchTerm={searchTerms.rooms ?? ""} setSearchTerm={(value) => setSearchForView("rooms", value)} roomList={roomList} setRoomList={setRoomList} team={team} setTeam={setTeam} studentsSource={studentList} attendanceRecords={attendanceRecords} onOpenRoomStudents={openRoomStudents} />,
     attendance: <AttendanceView user={user} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} setAttendanceRecords={setAttendanceRecords} setStudents={setStudentList} />,
     exams: <ExamsView user={user} exams={examList} setExams={setExamList} roomsSource={roomList} studentsSource={studentList} />,
-    ranking: <RankingView user={user} searchTerm={searchTerms.ranking ?? ""} setSearchTerm={(value) => setSearchForView("ranking", value)} exams={examList} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} />,
+    ranking: <RankingView user={user} searchTerm={searchTerms.ranking ?? ""} setSearchTerm={(value) => setSearchForView("ranking", value)} exams={examList} roomsSource={roomList} studentsSource={studentList} attendanceRecords={attendanceRecords} team={team} />,
     birthdays: <BirthdaysView user={user} searchTerm={searchTerms.birthdays ?? ""} setSearchTerm={(value) => setSearchForView("birthdays", value)} roomsSource={roomList} studentsSource={studentList} todayOnly={birthdaysTodayOnly} />,
     finance: <FinanceView categories={financialCategories} setCategories={setFinancialCategories} entries={financialEntries} setEntries={setFinancialEntries} readOnly={user.role !== "admin"} />,
     studentPortal: <StudentPortalAdminView user={user} roomsSource={roomList} settings={settings} setSettings={setSettings} />,

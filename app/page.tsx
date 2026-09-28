@@ -860,6 +860,24 @@ function getNextSundayInputDate() {
   return getUpcomingSundayOptions()[0] ?? getTodayInputDate();
 }
 
+function getMonthSundayOptions(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!match) return [];
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return [];
+  const totalDays = new Date(year, month, 0).getDate();
+  return Array.from({ length: totalDays }, (_, index) => index + 1)
+    .filter((day) => new Date(year, month - 1, day).getDay() === 0)
+    .map((day) => `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+}
+
+function formatMonthKey(monthKey: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(monthKey);
+  if (!match) return "Mês da escala";
+  return `${monthLabel(Number(match[2]))} de ${match[1]}`;
+}
+
 function calculateAge(birthday: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(birthday)) return 0;
   const birthDate = new Date(`${birthday}T00:00:00`);
@@ -5444,7 +5462,8 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
   const [editingId, setEditingId] = useState<number | null>(null);
   const [feedback, setFeedback] = useState("");
   const [scheduleFilterDate, setScheduleFilterDate] = useState("");
-  const sundayOptions = useMemo(() => getUpcomingSundayOptions(), []);
+  const [selectedMonth, setSelectedMonth] = useState(getTodayInputDate().slice(0, 7));
+  const monthSundayOptions = useMemo(() => getMonthSundayOptions(selectedMonth), [selectedMonth]);
   const [form, setForm] = useState<TeacherSchedule>({ scheduleDate: getNextSundayInputDate(), teacherId: teachers[0]?.id, teacherName: teachers[0]?.name ?? "", position: initialLocations[0] ?? "", location: initialLocations[0] ?? "", notes: "", active: true });
 
   async function persistLocations(nextLocations: string[]) {
@@ -5489,7 +5508,25 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
   function resetForm() {
     const firstLocation = locations[0] ?? "";
     setEditingId(null);
-    setForm({ scheduleDate: getNextSundayInputDate(), teacherId: teachers[0]?.id, teacherName: teachers[0]?.name ?? "", position: firstLocation, location: firstLocation, notes: "", active: true });
+    setForm({ scheduleDate: monthSundayOptions[0] ?? getNextSundayInputDate(), teacherId: teachers[0]?.id, teacherName: teachers[0]?.name ?? "", position: firstLocation, location: firstLocation, notes: "", active: true });
+  }
+
+  function changeMonth(value: string) {
+    const nextMonth = value || getTodayInputDate().slice(0, 7);
+    setSelectedMonth(nextMonth);
+    setScheduleFilterDate("");
+    if (!editingId) {
+      const firstSunday = getMonthSundayOptions(nextMonth)[0];
+      if (firstSunday) setForm((current) => ({ ...current, scheduleDate: firstSunday }));
+    }
+  }
+
+  function startEditing(item: TeacherSchedule) {
+    const displayLocation = item.location || item.position;
+    setSelectedMonth(normalizeStoredDate(item.scheduleDate).slice(0, 7));
+    setScheduleFilterDate("");
+    setEditingId(item.id ?? null);
+    setForm({ ...item, location: displayLocation, position: displayLocation });
   }
 
   async function saveSchedule(event: FormEvent<HTMLFormElement>) {
@@ -5508,6 +5545,7 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
     } else {
       setItems((current) => editingId ? current.map((item) => item.id === editingId ? { ...payload, id: editingId } : item) : [{ ...payload, id: Date.now() }, ...current]);
     }
+    setSelectedMonth(payload.scheduleDate.slice(0, 7));
     resetForm();
     setFeedback("Escala salva.");
     window.setTimeout(() => setFeedback(""), 1800);
@@ -5524,20 +5562,18 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
     } else setItems((current) => current.filter((item) => item.id !== id));
   }
 
-  const todayInput = getTodayInputDate();
-  const roleVisibleItems = (user.role === "teacher" ? items.filter((item) => item.teacherId === user.id || item.teacherName.toLowerCase() === user.name.toLowerCase()) : items)
-    .filter((item) => {
-      const scheduleDate = normalizeStoredDate(item.scheduleDate);
-      return isSundayDate(scheduleDate) && scheduleDate >= todayInput;
-    });
-  const visibleItems = scheduleFilterDate ? roleVisibleItems.filter((item) => normalizeStoredDate(item.scheduleDate) === scheduleFilterDate) : roleVisibleItems;
+  const monthItems = items
+    .filter((item) => item.active !== false)
+    .filter((item) => normalizeStoredDate(item.scheduleDate).slice(0, 7) === selectedMonth)
+    .sort((first, second) => normalizeStoredDate(first.scheduleDate).localeCompare(normalizeStoredDate(second.scheduleDate)) || first.teacherName.localeCompare(second.teacherName, "pt-BR"));
+  const visibleItems = scheduleFilterDate ? monthItems.filter((item) => normalizeStoredDate(item.scheduleDate) === scheduleFilterDate) : monthItems;
 
   return (
     <Section>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <h2 className="text-2xl font-extrabold text-brand-deep dark:text-white">Escala da escola</h2>
-          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Organize as datas e os locais de trabalho definidos pelo admin.</p>
+          <h2 className="text-2xl font-extrabold text-brand-deep dark:text-white">Escala de trabalho</h2>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Todos podem consultar a escala completa de {formatMonthKey(selectedMonth)}.</p>
         </div>
         {feedback ? <span className="rounded-full bg-emerald-50 px-4 py-2 text-sm font-extrabold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">{feedback}</span> : null}
       </div>
@@ -5566,7 +5602,7 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
               <label className="space-y-2">
                 <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Data</span>
                 <select value={form.scheduleDate} onChange={(event) => setForm((current) => ({ ...current, scheduleDate: event.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
-                  {Array.from(new Set([form.scheduleDate, ...sundayOptions])).filter(Boolean).map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
+                  {Array.from(new Set([form.scheduleDate, ...monthSundayOptions])).filter(Boolean).map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
                 </select>
               </label>
               <label className="space-y-2">
@@ -5594,37 +5630,54 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
 
       <div className="glass-panel flex flex-col gap-3 rounded-[1.4rem] p-4 shadow-soft sm:flex-row sm:items-end sm:justify-between">
         <label className="space-y-2">
-          <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Filtrar por data</span>
+          <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Mês da escala</span>
+          <input type="month" value={selectedMonth} onChange={(event) => changeMonth(event.target.value)} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" />
+        </label>
+        <label className="space-y-2">
+          <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Filtrar por domingo</span>
           <select value={scheduleFilterDate} onChange={(event) => setScheduleFilterDate(event.target.value)} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
-            <option value="">Todos os próximos domingos</option>
-            {sundayOptions.map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
+            <option value="">Todos os domingos do mês</option>
+            {monthSundayOptions.map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
           </select>
         </label>
         {scheduleFilterDate ? <button type="button" onClick={() => setScheduleFilterDate("")} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Limpar filtro</button> : null}
       </div>
 
-      <div className="grid gap-3">
-        {visibleItems.length ? visibleItems.map((item) => {
-          const displayLocation = item.location || item.position;
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {monthSundayOptions.map((date) => {
+          const dayItems = visibleItems.filter((item) => normalizeStoredDate(item.scheduleDate) === date);
           return (
-            <article key={item.id} className="glass-panel rounded-[1.4rem] p-4 shadow-soft">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <p className="text-sm font-extrabold text-brand-blue">{formatPlanningDate(item.scheduleDate)}</p>
-                  <h3 className="mt-1 text-xl font-extrabold text-brand-deep dark:text-white">{displayLocation}</h3>
-                  <p className="mt-1 text-sm font-bold text-slate-600 dark:text-slate-300">{item.teacherName}</p>
-                  {item.notes ? <p className="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">{item.notes}</p> : null}
-                </div>
-                {user.role === "admin" ? (
-                  <div className="flex gap-2">
-                    <IconButton label="Editar escala" onClick={() => { const displayLocation = item.location || item.position; setEditingId(item.id ?? null); setForm({ ...item, location: displayLocation, position: displayLocation }); }}><Pencil className="h-4 w-4" /></IconButton>
-                    <IconButton label="Excluir escala" onClick={() => void deleteSchedule(item.id)}><Trash2 className="h-4 w-4" /></IconButton>
-                  </div>
-                ) : null}
+            <article key={date} className="glass-panel rounded-[1.4rem] p-4 shadow-soft">
+              <div className="border-b border-slate-200 pb-3 dark:border-slate-700">
+                <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-blue">Domingo</p>
+                <h3 className="mt-1 text-xl font-extrabold text-brand-deep dark:text-white">{formatPlanningDate(date)}</h3>
+              </div>
+              <div className="mt-3 space-y-3">
+                {dayItems.length ? dayItems.map((item) => {
+                  const displayLocation = item.location || item.position;
+                  return (
+                    <div key={item.id} className="rounded-2xl bg-white/80 p-3 shadow-sm dark:bg-slate-900/80">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="font-extrabold text-brand-deep dark:text-white">{displayLocation}</p>
+                          <p className="mt-1 text-sm font-bold text-brand-blue">{item.teacherName}</p>
+                          {item.notes ? <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">{item.notes}</p> : null}
+                        </div>
+                        {user.role === "admin" ? (
+                          <div className="flex shrink-0 gap-1">
+                            <IconButton label="Editar escala" onClick={() => startEditing(item)}><Pencil className="h-4 w-4" /></IconButton>
+                            <IconButton label="Excluir escala" onClick={() => void deleteSchedule(item.id)}><Trash2 className="h-4 w-4" /></IconButton>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  );
+                }) : <p className="rounded-2xl bg-slate-50 p-3 text-xs font-bold text-slate-400 dark:bg-slate-900">Sem escala cadastrada.</p>}
               </div>
             </article>
           );
-        }) : <p className="rounded-2xl bg-white p-4 text-sm font-bold text-slate-500 shadow-sm dark:bg-slate-900">Nenhuma escala cadastrada.</p>}
+        })}
+        {!monthSundayOptions.length ? <p className="rounded-2xl bg-white p-4 text-sm font-bold text-slate-500 shadow-sm dark:bg-slate-900">Não foi possível carregar os domingos desse mês.</p> : null}
       </div>
     </Section>
   );

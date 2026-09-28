@@ -5530,6 +5530,35 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
     setForm({ ...item, location: displayLocation, position: displayLocation });
   }
 
+  function renderScheduleFields() {
+    return (
+      <>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <label className="space-y-2">
+            <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Data</span>
+            <select autoFocus value={form.scheduleDate} onChange={(event) => setForm((current) => ({ ...current, scheduleDate: event.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
+              {Array.from(new Set([form.scheduleDate, ...monthSundayOptions])).filter(Boolean).map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
+            </select>
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Professor ou admin</span>
+            <select value={form.teacherId ?? ""} onChange={(event) => { const teacher = teachers.find((item) => item.id === Number(event.target.value)); setForm((current) => ({ ...current, teacherId: teacher?.id, teacherName: teacher?.name ?? "" })); }} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
+              {teachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.name}</option>)}
+            </select>
+          </label>
+          <label className="space-y-2">
+            <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Local de trabalho</span>
+            <select value={form.location} onChange={(event) => setForm((current) => ({ ...current, location: event.target.value, position: event.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
+              <option value="">Selecione um local</option>
+              {locations.map((location) => <option key={location} value={location}>{location}</option>)}
+            </select>
+          </label>
+        </div>
+        <textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} rows={3} className="mt-3 w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Observações" />
+      </>
+    );
+  }
+
   async function saveSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!form.scheduleDate || !form.teacherName.trim() || !form.location.trim()) return;
@@ -5597,36 +5626,36 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
             </div>
           </div>
 
-          <form onSubmit={saveSchedule} className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
-            <h3 className="text-xl font-extrabold text-brand-deep dark:text-white">Criar ou editar escala</h3>
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              <label className="space-y-2">
-                <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Data</span>
-                <select value={form.scheduleDate} onChange={(event) => setForm((current) => ({ ...current, scheduleDate: event.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
-                  {Array.from(new Set([form.scheduleDate, ...monthSundayOptions])).filter(Boolean).map((date) => <option key={date} value={date}>{formatPlanningDate(date)}</option>)}
-                </select>
-              </label>
-              <label className="space-y-2">
-                <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Professor ou admin</span>
-                <select value={form.teacherId ?? ""} onChange={(event) => { const teacher = teachers.find((item) => item.id === Number(event.target.value)); setForm((current) => ({ ...current, teacherId: teacher?.id, teacherName: teacher?.name ?? "" })); }} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
-                  {teachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.name}</option>)}
-                </select>
-              </label>
-              <label className="space-y-2">
-                <span className="text-sm font-bold text-slate-600 dark:text-slate-300">Local de trabalho</span>
-                <select value={form.location} onChange={(event) => setForm((current) => ({ ...current, location: event.target.value, position: event.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900">
-                  <option value="">Selecione um local</option>
-                  {locations.map((location) => <option key={location} value={location}>{location}</option>)}
-                </select>
-              </label>
-            </div>
-            <textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} rows={3} className="mt-3 w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Observações" />
-            <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-              <button className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">{editingId ? "Salvar escala" : "Criar escala"}</button>
-              {editingId ? <button type="button" onClick={() => resetForm()} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Cancelar edição</button> : null}
-            </div>
-          </form>
+          {!editingId ? (
+            <form onSubmit={saveSchedule} className="glass-panel rounded-[1.8rem] p-5 shadow-soft">
+              <h3 className="text-xl font-extrabold text-brand-deep dark:text-white">Criar escala</h3>
+              <div className="mt-4">{renderScheduleFields()}</div>
+              <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+                <button className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">Criar escala</button>
+              </div>
+            </form>
+          ) : null}
         </div>
+      ) : null}
+
+      {editingId ? (
+        <motion.div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="editar-escala" initial={false} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => resetForm()}>
+          <motion.form className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-[1.8rem] bg-white p-6 shadow-2xl dark:bg-slate-950" initial={false} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.96, y: 16 }} onSubmit={saveSchedule} onClick={(event) => event.stopPropagation()}>
+            <div className="mb-5 flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-blue">Escala de trabalho</p>
+                <h3 id="editar-escala" className="mt-1 text-2xl font-extrabold text-brand-deep dark:text-white">Editar escala</h3>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Atualize a data, o responsável, o local e as observações.</p>
+              </div>
+              <IconButton label="Fechar edição" onClick={() => resetForm()}><X className="h-4 w-4" /></IconButton>
+            </div>
+            {renderScheduleFields()}
+            <div className="mt-5 grid gap-2 sm:grid-cols-2">
+              <button className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">Salvar alterações</button>
+              <button type="button" onClick={() => resetForm()} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Cancelar</button>
+            </div>
+          </motion.form>
+        </motion.div>
       ) : null}
 
       <div className="glass-panel flex flex-col gap-3 rounded-[1.4rem] p-4 shadow-soft sm:flex-row sm:items-end sm:justify-between">

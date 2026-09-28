@@ -5505,10 +5505,11 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
     void loadSchedules();
   }, []);
 
-  function resetForm() {
+  function resetForm(monthKey = selectedMonth, preferredDate?: string) {
     const firstLocation = locations[0] ?? "";
+    const nextDate = preferredDate && preferredDate.startsWith(`${monthKey}-`) ? preferredDate : getMonthSundayOptions(monthKey)[0] ?? getNextSundayInputDate();
     setEditingId(null);
-    setForm({ scheduleDate: monthSundayOptions[0] ?? getNextSundayInputDate(), teacherId: teachers[0]?.id, teacherName: teachers[0]?.name ?? "", position: firstLocation, location: firstLocation, notes: "", active: true });
+    setForm({ scheduleDate: nextDate, teacherId: teachers[0]?.id, teacherName: teachers[0]?.name ?? "", position: firstLocation, location: firstLocation, notes: "", active: true });
   }
 
   function changeMonth(value: string) {
@@ -5546,7 +5547,7 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
       setItems((current) => editingId ? current.map((item) => item.id === editingId ? { ...payload, id: editingId } : item) : [{ ...payload, id: Date.now() }, ...current]);
     }
     setSelectedMonth(payload.scheduleDate.slice(0, 7));
-    resetForm();
+    resetForm(payload.scheduleDate.slice(0, 7), payload.scheduleDate);
     setFeedback("Escala salva.");
     window.setTimeout(() => setFeedback(""), 1800);
   }
@@ -5622,7 +5623,7 @@ function TeacherScheduleView({ user, team, settings, setSettings }: { user: AppU
             <textarea value={form.notes} onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))} rows={3} className="mt-3 w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none dark:border-slate-700 dark:bg-slate-900" placeholder="Observações" />
             <div className="mt-4 flex flex-col gap-2 sm:flex-row">
               <button className="rounded-full bg-brand-blue px-5 py-3 text-sm font-extrabold text-white">{editingId ? "Salvar escala" : "Criar escala"}</button>
-              {editingId ? <button type="button" onClick={resetForm} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Cancelar edição</button> : null}
+              {editingId ? <button type="button" onClick={() => resetForm()} className="rounded-full bg-slate-100 px-5 py-3 text-sm font-extrabold text-slate-600 dark:bg-slate-800 dark:text-slate-200">Cancelar edição</button> : null}
             </div>
           </form>
         </div>

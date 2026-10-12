@@ -39,6 +39,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Power,
   Search,
   Send,
   Settings,
@@ -4828,6 +4829,7 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
   const [editingContentId, setEditingContentId] = useState<number | null>(null);
   const [editingLibraryId, setEditingLibraryId] = useState<number | null>(null);
   const [editingMinistryId, setEditingMinistryId] = useState<number | null>(null);
+  const [togglingMinistryId, setTogglingMinistryId] = useState<number | null>(null);
   const [ministryModalOpen, setMinistryModalOpen] = useState(false);
   const defaultContentType: PortalContentType = user.role === "teacher" ? "lesson" : "video";
   const contentTypeOptions = Object.entries(portalTypeLabels).filter(([value]) => user.role === "admin" || value === "message" || value === "lesson");
@@ -5080,6 +5082,31 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
       await supabase.from("student_ministry_items").delete().eq("id", id);
       await loadPortalData();
     } else setMinistryItems((current) => current.filter((item) => item.id !== id));
+  }
+
+  async function toggleMinistryItem(item: MinistryItem) {
+    if (!item.id || togglingMinistryId === item.id) return;
+    const active = !item.active;
+    setTogglingMinistryId(item.id);
+    setFeedback(`${active ? "Ativando" : "Desativando"} produto...`);
+    try {
+      const payload = { ...item, active };
+      if (isNeonProvider) {
+        await neonMutate<MinistryItem>("ministryItem", "update", payload, item.id);
+        await loadPortalData(false);
+      } else if (supabase) {
+        const { error } = await supabase.from("student_ministry_items").update(toDbMinistryItem(payload)).eq("id", item.id);
+        if (error) throw error;
+        await loadPortalData(false);
+      } else {
+        setMinistryItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, active } : entry));
+      }
+      setFeedback(`Produto ${active ? "ativado" : "desativado"}.`);
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Não foi possível alterar a disponibilidade do produto.");
+    } finally {
+      setTogglingMinistryId(null);
+    }
   }
 
   async function updateInteraction(table: "student_questions" | "student_prayer_requests", item: StudentInteraction, patch: Partial<StudentInteraction>) {
@@ -5343,7 +5370,8 @@ function StudentPortalAdminView({ user, roomsSource, settings, setSettings }: { 
                   </div>
                   <div className="mt-3 grid grid-cols-2 gap-2">
                     <button type="button" onClick={() => { setEditingMinistryId(item.id ?? null); setMinistryForm(item); setMinistryModalOpen(true); }} className="inline-flex items-center justify-center gap-1 rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200"><Pencil className="h-3.5 w-3.5" /> Editar</button>
-                    <button type="button" onClick={() => void deleteMinistryItem(item.id)} className="inline-flex items-center justify-center gap-1 rounded-full bg-red-50 px-3 py-2 text-xs font-extrabold text-red-700 transition hover:bg-red-100 dark:bg-red-500/10 dark:text-red-200"><Trash2 className="h-3.5 w-3.5" /> Excluir</button>
+                    <button type="button" disabled={!item.id || togglingMinistryId === item.id} onClick={() => void toggleMinistryItem(item)} className={"inline-flex items-center justify-center gap-1 rounded-full px-3 py-2 text-xs font-extrabold transition disabled:cursor-wait disabled:opacity-60 " + (item.active ? "bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-500/10 dark:text-amber-200" : "bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-200")}><Power className="h-3.5 w-3.5" /> {togglingMinistryId === item.id ? "Salvando..." : item.active ? "Desativar" : "Ativar"}</button>
+                    <button type="button" onClick={() => void deleteMinistryItem(item.id)} className="col-span-2 inline-flex items-center justify-center gap-1 rounded-full bg-red-50 px-3 py-2 text-xs font-extrabold text-red-700 transition hover:bg-red-100 dark:bg-red-500/10 dark:text-red-200"><Trash2 className="h-3.5 w-3.5" /> Excluir</button>
                   </div>
                 </article>
               ))}

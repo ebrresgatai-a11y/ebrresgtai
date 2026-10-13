@@ -3992,6 +3992,7 @@ function FinanceView({
   const [selectedMonth, setSelectedMonth] = useState<string>(String(getCurrentMonth()));
   const [selectedDay, setSelectedDay] = useState<string>("todos");
   const [selectedYear, setSelectedYear] = useState(getCurrentYear());
+  const [selectedFinanceCategory, setSelectedFinanceCategory] = useState<{ type: FinancialEntry["type"]; name: string } | null>(null);
   const [entryMonth, setEntryMonth] = useState(getCurrentMonth());
   const availableYears = Array.from(new Set([getCurrentYear(), ...entries.map((entry) => entry.year)])).sort((a, b) => b - a);
   const availableDays = getFinancialFilterDayOptions(entries, selectedMonth, selectedYear);
@@ -4036,6 +4037,14 @@ function FinanceView({
     : saldo >= 0
       ? `As entradas superaram as saídas em R$ ${formatCurrencyBRL(saldo)} no período. ${topEntrada ? `A principal origem foi ${topEntrada.name}, com ${Math.round(topEntrada.percentage)}% das entradas.` : ""}`
       : `As saídas superaram as entradas em R$ ${formatCurrencyBRL(Math.abs(saldo))} no período. ${topSaida ? `A maior concentração está em ${topSaida.name}, com ${Math.round(topSaida.percentage)}% das saídas.` : ""}`;
+  const selectedFinanceCategoryEntries = selectedFinanceCategory
+    ? filteredEntries
+        .filter((entry) => entry.type === selectedFinanceCategory.type && (entry.category.trim() || "sem categoria") === selectedFinanceCategory.name)
+        .sort((a, b) => b.id - a.id)
+    : [];
+  const selectedFinanceCategoryTotal = selectedFinanceCategoryEntries.reduce((sum, entry) => sum + entry.value, 0);
+  const selectedFinanceCategoryItems = selectedFinanceCategory?.type === "entrada" ? entradaCategorias : saidaCategorias;
+  const selectedFinanceCategorySummary = selectedFinanceCategoryItems.find((item) => item.name === selectedFinanceCategory?.name);
 
   async function persistCategoryList(type: FinancialEntry["type"], nextList: string[]) {
     const cleanList = Array.from(new Set(nextList.map((item) => item.trim().toLowerCase()).filter(Boolean)));
@@ -4471,8 +4480,8 @@ function FinanceView({
           </div>
           <div className="mt-5 grid gap-4 lg:grid-cols-2">
             {[
-              { title: "Entradas por categoria", subtitle: "De onde vieram os recursos", items: entradaCategorias, empty: "Nenhuma entrada registrada neste período.", bar: "bg-brand-green", value: "text-brand-green" },
-              { title: "Saídas por categoria", subtitle: "Para onde foram os recursos", items: saidaCategorias, empty: "Nenhuma saída registrada neste período.", bar: "bg-brand-red", value: "text-brand-red" }
+              { type: "entrada" as const, title: "Entradas por categoria", subtitle: "De onde vieram os recursos", items: entradaCategorias, empty: "Nenhuma entrada registrada neste período.", bar: "bg-brand-green", value: "text-brand-green" },
+              { type: "saida" as const, title: "Saídas por categoria", subtitle: "Para onde foram os recursos", items: saidaCategorias, empty: "Nenhuma saída registrada neste período.", bar: "bg-brand-red", value: "text-brand-red" }
             ].map((panel) => (
               <div key={panel.title} className="rounded-3xl bg-white p-4 shadow-sm dark:bg-slate-900">
                 <div className="flex items-start justify-between gap-3">
@@ -4490,9 +4499,15 @@ function FinanceView({
                           <span className="min-w-0 truncate font-extrabold capitalize text-slate-700 dark:text-slate-200">{item.name}</span>
                           <span className={`shrink-0 font-extrabold ${panel.value}`}>R$ {formatCurrencyBRL(item.value)}</span>
                         </div>
-                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
-                          <div className={`h-full rounded-full ${panel.bar}`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
-                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedFinanceCategory({ type: panel.type, name: item.name })}
+                          className="group mt-2 block h-3 w-full cursor-pointer overflow-hidden rounded-full bg-slate-100 text-left transition hover:ring-2 hover:ring-brand-blue/30 focus:outline-none focus:ring-2 focus:ring-brand-blue/50 dark:bg-slate-800"
+                          title={`Ver lançamentos de ${item.name}`}
+                          aria-label={`Ver lançamentos da categoria ${item.name}`}
+                        >
+                          <span className={`block h-full rounded-full transition group-hover:brightness-95 ${panel.bar}`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
+                        </button>
                         <p className="mt-1 text-[0.68rem] font-semibold text-slate-500 dark:text-slate-400">{Math.round(item.percentage)}% do total • {item.count} {item.count === 1 ? "lançamento" : "lançamentos"}</p>
                       </div>
                     ))}
@@ -4534,6 +4549,56 @@ function FinanceView({
         </div>
       </div>
       <AnimatePresence>
+        {selectedFinanceCategory ? (
+          <motion.div
+            className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4 backdrop-blur-sm"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="detalhes-categoria-financeira"
+            onClick={() => setSelectedFinanceCategory(null)}
+          >
+            <motion.div
+              className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-[1.8rem] bg-white p-5 shadow-2xl dark:bg-slate-950"
+              initial={{ scale: 0.96, y: 16 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.96, y: 16 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-xs font-extrabold uppercase tracking-[0.18em] text-brand-blue">
+                    {selectedFinanceCategory.type === "entrada" ? "Entradas" : "Saídas"} • {selectedPeriodLabel}
+                  </p>
+                  <h3 id="detalhes-categoria-financeira" className="mt-1 text-2xl font-extrabold capitalize text-brand-deep dark:text-white">{selectedFinanceCategory.name}</h3>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                    {selectedFinanceCategoryEntries.length} {selectedFinanceCategoryEntries.length === 1 ? "lançamento" : "lançamentos"} • {Math.round(selectedFinanceCategorySummary?.percentage ?? 0)}% das {selectedFinanceCategory.type === "entrada" ? "entradas" : "saídas"}
+                  </p>
+                </div>
+                <IconButton label="Fechar detalhes da categoria" onClick={() => setSelectedFinanceCategory(null)}><X className="h-4 w-4" /></IconButton>
+              </div>
+              <div className={`mt-5 rounded-2xl p-4 ${selectedFinanceCategory.type === "entrada" ? "bg-emerald-50 dark:bg-emerald-500/10" : "bg-rose-50 dark:bg-rose-500/10"}`}>
+                <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Valor acumulado</p>
+                <p className={`mt-1 text-2xl font-extrabold ${selectedFinanceCategory.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>R$ {formatCurrencyBRL(selectedFinanceCategoryTotal)}</p>
+              </div>
+              <div className="mt-4 space-y-2">
+                {selectedFinanceCategoryEntries.length ? selectedFinanceCategoryEntries.map((entry) => (
+                  <div key={entry.id} className="flex items-center justify-between gap-4 rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+                    <div className="min-w-0">
+                      <p className="truncate font-extrabold text-slate-800 dark:text-white">{entry.title}</p>
+                      <p className="mt-1 text-sm capitalize text-slate-500 dark:text-slate-400">{formatFinancialEntryDate(entry)} • {entry.category}</p>
+                    </div>
+                    <p className={`shrink-0 text-base font-extrabold ${selectedFinanceCategory.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>R$ {formatCurrencyBRL(entry.value)}</p>
+                  </div>
+                )) : (
+                  <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500 dark:bg-slate-900 dark:text-slate-400">Nenhum lançamento encontrado nesta categoria para o período selecionado.</p>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        ) : null}
         {deleteCategory ? (
           <ConfirmModal
             message={`Deseja realmente excluir a categoria ${deleteCategory.name}?`}

@@ -4011,6 +4011,31 @@ function FinanceView({
       entradas: entries.filter((entry) => entry.year === selectedYear && entry.month === month.value && entry.type === "entrada").reduce((sum, entry) => sum + entry.value, 0),
       saidas: entries.filter((entry) => entry.year === selectedYear && entry.month === month.value && entry.type === "saida").reduce((sum, entry) => sum + entry.value, 0)
     }));
+  const categorySummary = (type: FinancialEntry["type"]) => {
+    const grouped = filteredEntries
+      .filter((entry) => entry.type === type)
+      .reduce<Record<string, { value: number; count: number }>>((summary, entry) => {
+        const name = entry.category.trim() || "sem categoria";
+        const current = summary[name] ?? { value: 0, count: 0 };
+        summary[name] = { value: current.value + entry.value, count: current.count + 1 };
+        return summary;
+      }, {});
+    const total = Object.values(grouped).reduce((sum, item) => sum + item.value, 0);
+    return Object.entries(grouped)
+      .map(([name, item]) => ({ name, ...item, percentage: total ? (item.value / total) * 100 : 0 }))
+      .sort((a, b) => b.value - a.value);
+  };
+  const entradaCategorias = categorySummary("entrada");
+  const saidaCategorias = categorySummary("saida");
+  const selectedMonthLabel = selectedMonth === "todos" ? `ano ${selectedYear}` : `${monthOptions.find((month) => month.value === Number(selectedMonth))?.label ?? "mês selecionado"} de ${selectedYear}`;
+  const selectedPeriodLabel = selectedDay === "todos" ? selectedMonthLabel : `${selectedMonthLabel}, dia ${String(selectedDay).padStart(2, "0")}`;
+  const topEntrada = entradaCategorias[0];
+  const topSaida = saidaCategorias[0];
+  const financeNarrative = !filteredEntries.length
+    ? `Ainda não há lançamentos para ${selectedPeriodLabel}.`
+    : saldo >= 0
+      ? `As entradas superaram as saídas em R$ ${formatCurrencyBRL(saldo)} no período. ${topEntrada ? `A principal origem foi ${topEntrada.name}, com ${Math.round(topEntrada.percentage)}% das entradas.` : ""}`
+      : `As saídas superaram as entradas em R$ ${formatCurrencyBRL(Math.abs(saldo))} no período. ${topSaida ? `A maior concentração está em ${topSaida.name}, com ${Math.round(topSaida.percentage)}% das saídas.` : ""}`;
 
   async function persistCategoryList(type: FinancialEntry["type"], nextList: string[]) {
     const cleanList = Array.from(new Set(nextList.map((item) => item.trim().toLowerCase()).filter(Boolean)));
@@ -4417,6 +4442,66 @@ function FinanceView({
             ))}
           </div>
         </div>        ) : null}
+        <div className="glass-panel rounded-[1.8rem] p-5 shadow-soft xl:col-span-2">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div>
+              <p className="text-xs font-extrabold uppercase tracking-[0.18em] text-brand-blue">Apresentação financeira</p>
+              <h2 className="mt-1 text-2xl font-extrabold text-brand-deep dark:text-white">Leitura executiva do período</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">{financeNarrative}</p>
+            </div>
+            <span className={`rounded-full px-4 py-2 text-sm font-extrabold ${saldo >= 0 ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200" : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"}`}>
+              {saldo >= 0 ? "Saldo positivo" : "Atenção ao saldo"}
+            </span>
+          </div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-3">
+            <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+              <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Período analisado</p>
+              <p className="mt-2 text-base font-extrabold capitalize text-brand-deep dark:text-white">{selectedPeriodLabel}</p>
+            </div>
+            <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+              <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Movimentação total</p>
+              <p className="mt-2 text-base font-extrabold text-brand-deep dark:text-white">R$ {formatCurrencyBRL(totalEntradas + totalSaidas)}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">Entradas + saídas registradas</p>
+            </div>
+            <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+              <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Resultado</p>
+              <p className={`mt-2 text-base font-extrabold ${saldo >= 0 ? "text-brand-green" : "text-brand-red"}`}>R$ {formatCurrencyBRL(saldo)}</p>
+              <p className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">Entradas menos saídas</p>
+            </div>
+          </div>
+          <div className="mt-5 grid gap-4 lg:grid-cols-2">
+            {[
+              { title: "Entradas por categoria", subtitle: "De onde vieram os recursos", items: entradaCategorias, empty: "Nenhuma entrada registrada neste período.", bar: "bg-brand-green", value: "text-brand-green" },
+              { title: "Saídas por categoria", subtitle: "Para onde foram os recursos", items: saidaCategorias, empty: "Nenhuma saída registrada neste período.", bar: "bg-brand-red", value: "text-brand-red" }
+            ].map((panel) => (
+              <div key={panel.title} className="rounded-3xl bg-white p-4 shadow-sm dark:bg-slate-900">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-lg font-extrabold text-brand-deep dark:text-white">{panel.title}</h3>
+                    <p className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">{panel.subtitle}</p>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-xs font-extrabold ${panel.value === "text-brand-green" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200" : "bg-rose-50 text-rose-700 dark:bg-rose-500/10 dark:text-rose-200"}`}>{panel.items.length} {panel.items.length === 1 ? "categoria" : "categorias"}</span>
+                </div>
+                {panel.items.length ? (
+                  <div className="mt-4 space-y-4">
+                    {panel.items.map((item) => (
+                      <div key={item.name}>
+                        <div className="flex items-center justify-between gap-3 text-sm">
+                          <span className="min-w-0 truncate font-extrabold capitalize text-slate-700 dark:text-slate-200">{item.name}</span>
+                          <span className={`shrink-0 font-extrabold ${panel.value}`}>R$ {formatCurrencyBRL(item.value)}</span>
+                        </div>
+                        <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                          <div className={`h-full rounded-full ${panel.bar}`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
+                        </div>
+                        <p className="mt-1 text-[0.68rem] font-semibold text-slate-500 dark:text-slate-400">{Math.round(item.percentage)}% do total • {item.count} {item.count === 1 ? "lançamento" : "lançamentos"}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : <p className="mt-4 rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500 dark:bg-slate-800 dark:text-slate-400">{panel.empty}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="glass-panel rounded-[1.8rem] p-4 shadow-soft">

@@ -406,11 +406,17 @@ function InteractionHistory({ title, items, emptyText }: { title: string; items:
 }
 
 function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
+  const currentPeriodEntries = useMemo(() => {
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentYear = today.getFullYear();
+    return entries.filter((entry) => entry.month === currentMonth && entry.year === currentYear);
+  }, [entries]);
   const summary = useMemo(() => {
-    const totalEntradas = entries.filter((entry) => entry.type === "entrada").reduce((sum, entry) => sum + entry.value, 0);
-    const totalSaidas = entries.filter((entry) => entry.type === "saida").reduce((sum, entry) => sum + entry.value, 0);
+    const totalEntradas = currentPeriodEntries.filter((entry) => entry.type === "entrada").reduce((sum, entry) => sum + entry.value, 0);
+    const totalSaidas = currentPeriodEntries.filter((entry) => entry.type === "saida").reduce((sum, entry) => sum + entry.value, 0);
     const categories = (type: FinancialEntry["type"], total: number) => {
-      const grouped = entries
+      const grouped = currentPeriodEntries
         .filter((entry) => entry.type === type)
         .reduce<Record<string, { value: number; count: number }>>((result, entry) => {
           const name = entry.category.trim() || "sem categoria";
@@ -429,7 +435,7 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
       entradaCategorias: categories("entrada", totalEntradas),
       saidaCategorias: categories("saida", totalSaidas)
     };
-  }, [entries]);
+  }, [currentPeriodEntries]);
 
   const panels = [
     { title: "Entradas por categoria", items: summary.entradaCategorias, color: "bg-brand-green", valueColor: "text-brand-green", empty: "Nenhuma entrada registrada." },
@@ -460,7 +466,7 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
           <p className={`mt-1 text-base font-extrabold ${summary.saldo >= 0 ? "text-brand-blue" : "text-brand-red"}`}>R$ {formatStudentMoney(summary.saldo)}</p>
         </div>
       </div>
-      {entries.length ? (
+      {currentPeriodEntries.length ? (
         <>
           <div className="mt-4 grid gap-3 lg:grid-cols-2">
             {panels.map((panel) => (
@@ -486,7 +492,7 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
           <div className="mt-4">
             <h3 className="text-sm font-extrabold text-brand-deep dark:text-white">Lançamentos recentes</h3>
             <div className="mt-2 space-y-2">
-              {entries.slice(0, 6).map((entry) => (
+              {currentPeriodEntries.slice(0, 6).map((entry) => (
                 <div key={entry.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900">
                   <div className="min-w-0">
                     <p className="truncate text-xs font-extrabold text-slate-700 dark:text-slate-200">{entry.title}</p>

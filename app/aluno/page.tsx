@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Bell, BookOpenCheck, Camera, Check, DollarSign, ExternalLink, FileText, MessageCircle, MoreHorizontal, Search, Send, Sparkles, Trash2, Upload, UserRoundPlus } from "lucide-react";
+import { Bell, BookOpenCheck, Camera, Check, DollarSign, ExternalLink, FileText, MessageCircle, MoreHorizontal, Search, Send, Sparkles, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { fetchNeonJson, isNeonProvider } from "@/lib/data-provider";
 import { listenForForegroundPush, registerEbrServiceWorker, registerStudentPushToken } from "@/lib/firebase-client";
@@ -435,10 +435,18 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
       saidaCategorias: categories("saida", totalSaidas)
     };
   }, [currentYearEntries]);
+  const [selectedCategory, setSelectedCategory] = useState<{ type: FinancialEntry["type"]; name: string } | null>(null);
+  const selectedCategoryEntries = useMemo(() => {
+    if (!selectedCategory) return [];
+    return currentYearEntries
+      .filter((entry) => entry.type === selectedCategory.type && (entry.category.trim() || "sem categoria") === selectedCategory.name)
+      .sort((a, b) => b.id - a.id);
+  }, [currentYearEntries, selectedCategory]);
+  const selectedCategoryTotal = selectedCategoryEntries.reduce((sum, entry) => sum + entry.value, 0);
 
   const panels = [
-    { title: "Entradas por categoria", items: summary.entradaCategorias, color: "bg-brand-green", valueColor: "text-brand-green", empty: "Nenhuma entrada registrada." },
-    { title: "Saídas por categoria", items: summary.saidaCategorias, color: "bg-brand-red", valueColor: "text-brand-red", empty: "Nenhuma saída registrada." }
+    { type: "entrada" as const, title: "Entradas por categoria", items: summary.entradaCategorias, color: "bg-brand-green", valueColor: "text-brand-green", empty: "Nenhuma entrada registrada." },
+    { type: "saida" as const, title: "Saídas por categoria", items: summary.saidaCategorias, color: "bg-brand-red", valueColor: "text-brand-red", empty: "Nenhuma saída registrada." }
   ];
 
   return (
@@ -478,9 +486,15 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
                         <span className="min-w-0 truncate font-extrabold capitalize text-slate-700 dark:text-slate-200">{item.name}</span>
                         <span className={`shrink-0 font-extrabold ${panel.valueColor}`}>R$ {formatStudentMoney(item.value)}</span>
                       </div>
-                      <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                        <div className={`h-full rounded-full ${panel.color}`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
-                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedCategory({ type: panel.type, name: item.name })}
+                        className="group mt-1.5 block h-2 w-full cursor-pointer overflow-hidden rounded-full bg-slate-200 text-left transition hover:ring-2 hover:ring-brand-blue/30 focus:outline-none focus:ring-2 focus:ring-brand-blue/50 dark:bg-slate-800"
+                        title={`Ver lançamentos de ${item.name}`}
+                        aria-label={`Ver detalhamento de ${item.name}`}
+                      >
+                        <span className={`block h-full rounded-full ${panel.color} transition group-hover:brightness-95`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
+                      </button>
                       <p className="mt-1 text-[0.65rem] font-semibold text-slate-500 dark:text-slate-400">{Math.round(item.percentage)}% • {item.count} {item.count === 1 ? "lançamento" : "lançamentos"}</p>
                     </div>
                   )) : <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">{panel.empty}</p>}
@@ -504,6 +518,45 @@ function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
           </div>
         </>
       ) : <p className="mt-4 rounded-2xl bg-slate-50 p-3 text-xs font-bold text-slate-500 dark:bg-slate-900 dark:text-slate-400">Nenhum lançamento financeiro disponível para visualização.</p>}
+      {selectedCategory ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="student-finance-category-details"
+          onClick={() => setSelectedCategory(null)}
+        >
+          <div className="max-h-[88vh] w-full max-w-2xl overflow-y-auto rounded-[1.8rem] bg-white p-5 shadow-2xl dark:bg-slate-950" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-extrabold uppercase tracking-[0.18em] text-brand-blue">Detalhamento dos gastos • ano vigente</p>
+                <h3 id="student-finance-category-details" className="mt-1 text-2xl font-extrabold capitalize text-brand-deep dark:text-white">{selectedCategory.name}</h3>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  {selectedCategoryEntries.length} {selectedCategoryEntries.length === 1 ? "lançamento" : "lançamentos"}
+                </p>
+              </div>
+              <button type="button" onClick={() => setSelectedCategory(null)} aria-label="Fechar detalhamento" className="grid h-9 w-9 place-items-center rounded-full bg-slate-100 text-slate-600 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className={`mt-5 rounded-2xl p-4 ${selectedCategory.type === "entrada" ? "bg-emerald-50 dark:bg-emerald-500/10" : "bg-rose-50 dark:bg-rose-500/10"}`}>
+              <p className="text-xs font-extrabold uppercase tracking-wide text-slate-500 dark:text-slate-400">Total da categoria</p>
+              <p className={`mt-1 text-2xl font-extrabold ${selectedCategory.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>R$ {formatStudentMoney(selectedCategoryTotal)}</p>
+            </div>
+            <div className="mt-4 space-y-2">
+              {selectedCategoryEntries.length ? selectedCategoryEntries.map((entry) => (
+                <div key={entry.id} className="flex items-center justify-between gap-4 rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
+                  <div className="min-w-0">
+                    <p className="truncate font-extrabold text-slate-800 dark:text-white">{entry.title}</p>
+                    <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{entry.date ? new Date(entry.date + "T00:00:00").toLocaleDateString("pt-BR") : "Data não informada"}</p>
+                  </div>
+                  <p className={`shrink-0 text-base font-extrabold ${selectedCategory.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>R$ {formatStudentMoney(entry.value)}</p>
+                </div>
+              )) : <p className="rounded-2xl bg-slate-50 p-4 text-sm font-semibold text-slate-500 dark:bg-slate-900 dark:text-slate-400">Nenhum lançamento encontrado nesta categoria.</p>}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

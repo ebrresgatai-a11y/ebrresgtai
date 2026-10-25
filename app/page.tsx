@@ -4165,7 +4165,7 @@ function FinanceView({
     const month = Number(formData.get("installmentMonth") || entryMonth);
     const day = Math.max(1, Math.min(31, Number(formData.get("installmentDay") || defaultEntryDay)));
     const year = Number(formData.get("installmentYear") || selectedYear);
-    const installments = Math.max(2, Math.min(24, Number(formData.get("installments") || 2)));
+    const installments = Math.max(1, Math.min(24, Number(formData.get("installments") || 1)));
     const totalCents = Math.round(totalValue * 100);
     if (!title || totalCents <= 0) return;
 
@@ -4178,7 +4178,7 @@ function FinanceView({
       return {
         id: Date.now() + index,
         type: "saida",
-        title: `${title} (${index + 1}/${installments})`,
+        title: installments === 1 ? title : `${title} (${index + 1}/${installments})`,
         category,
         value: (baseCents + (index < remainderCents ? 1 : 0)) / 100,
         month: dueMonth,
@@ -4194,7 +4194,7 @@ function FinanceView({
     const installmentsInput = event.currentTarget.elements.namedItem("installments") as HTMLSelectElement | null;
     if (titleInput) titleInput.value = "";
     if (totalInput) totalInput.value = "";
-    if (installmentsInput) installmentsInput.value = "2";
+    if (installmentsInput) installmentsInput.value = "1";
 
     try {
       if (isNeonProvider) {
@@ -4205,7 +4205,7 @@ function FinanceView({
         if (error) throw error;
         setEntries((current) => [...current.filter((entry) => !pendingEntryIds.has(entry.id)), ...(data ?? []).map(fromDbEntry)].sort((a, b) => b.id - a.id));
       }
-      setFinanceFeedback({ kind: "success", message: `${installments} parcelas criadas com vencimento no dia 05.` });
+      setFinanceFeedback({ kind: "success", message: `${installments} ${installments === 1 ? "parcela criada" : "parcelas criadas"} com vencimento no dia 05.` });
       window.setTimeout(() => setFinanceFeedback(null), 2200);
     } catch {
       setEntries((current) => current.filter((entry) => !pendingEntryIds.has(entry.id)));
@@ -4360,8 +4360,8 @@ function FinanceView({
             <button type="submit" className="rounded-full bg-amber-400 px-5 py-3 text-sm font-extrabold text-amber-950 transition hover:-translate-y-0.5">
               Parcelar
             </button>
-            <select name="installments" defaultValue="2" aria-label="Quantidade de parcelas" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
-              {Array.from({ length: 23 }, (_, index) => index + 2).map((installment) => <option key={installment} value={installment}>{installment} parcelas</option>)}
+            <select name="installments" defaultValue="1" aria-label="Quantidade de parcelas" className="rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-bold outline-none dark:border-slate-700 dark:bg-slate-900">
+              {Array.from({ length: 24 }, (_, index) => index + 1).map((installment) => <option key={installment} value={installment}>{installment} {installment === 1 ? "parcela" : "parcelas"}</option>)}
             </select>
             <p className="lg:col-span-6 text-sm font-semibold text-slate-500 dark:text-slate-400">O valor total será dividido automaticamente. Até o dia 05, a primeira parcela vence no mesmo mês; após o dia 05, ela vence no mês seguinte.</p>
           </form>

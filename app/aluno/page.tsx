@@ -575,6 +575,26 @@ export default function StudentPortalPage() {
   }, [student?.id]);
 
   useEffect(() => {
+    if (!student || typeof window === "undefined") return;
+    const currentStudent = student;
+    const refreshFinance = () => {
+      void loadStudentFinance(currentStudent).catch(() => undefined);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshFinance();
+    };
+    refreshFinance();
+    const timer = window.setInterval(refreshFinance, 15000);
+    window.addEventListener("focus", refreshFinance);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshFinance);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [student?.id]);
+
+  useEffect(() => {
     if (!student || !isNeonProvider || typeof window === "undefined" || !("Notification" in window)) return;
     if (Notification.permission !== "granted") return;
     void registerStudentPushToken(student.id);
@@ -668,9 +688,21 @@ export default function StudentPortalPage() {
     setPrayers((prayerResult.data ?? []).map(fromDbInteraction).filter(isRecentInteraction));
   }
 
+  async function loadStudentFinance(currentStudent: Student) {
+    if (isNeonProvider) {
+      const data = await fetchNeonJson<{ financialEntries: FinancialEntry[] }>("/api/neon/portal?" + new URLSearchParams({ audience: "studentFinance", studentId: String(currentStudent.id) }).toString(), { cache: "no-store" });
+      setFinancialEntries(data.financialEntries ?? []);
+      return;
+    }
+    if (!supabase) return;
+    const { data, error } = await supabase.from("financial_entries").select("id,type,title,category,value,date,month,year").order("id", { ascending: false });
+    if (error) throw error;
+    setFinancialEntries((data ?? []).map(fromDbFinancialEntry));
+  }
+
   async function loadPortalForStudent(found: Student) {
     if (isNeonProvider) {
-      const data = await fetchNeonJson<{ contents: PortalContent[]; libraryItems: LibraryItem[]; ministryItems: MinistryItem[]; settings: Record<string, string>; questions: StudentInteraction[]; prayers: StudentInteraction[]; financialEntries: FinancialEntry[] }>("/api/neon/portal?" + new URLSearchParams({ audience: "student", studentId: String(found.id), room: found.room }).toString());
+      const data = await fetchNeonJson<{ contents: PortalContent[]; libraryItems: LibraryItem[]; ministryItems: MinistryItem[]; settings: Record<string, string>; questions: StudentInteraction[]; prayers: StudentInteraction[]; financialEntries: FinancialEntry[] }>("/api/neon/portal?" + new URLSearchParams({ audience: "student", studentId: String(found.id), room: found.room }).toString(), { cache: "no-store" });
       setStudent(found);
       setContents(data.contents ?? []);
       setLibraryItems(data.libraryItems ?? []);
@@ -687,7 +719,7 @@ export default function StudentPortalPage() {
       supabase.from("student_library_items").select("id,title,description,price,image_url,payment_url,stock_quantity,active").eq("active", true).order("created_at", { ascending: false }),
       supabase.from("student_ministry_items").select("id,title,description,price,payment_key,image_url,active").eq("active", true).order("created_at", { ascending: false }),
       supabase.from("app_settings").select("*").eq("key", "general").maybeSingle(),
-      supabase.from("financial_entries").select("id,type,title,category,value,date,month,year").order("date", { ascending: false }).order("id", { ascending: false }).limit(240)
+      supabase.from("financial_entries").select("id,type,title,category,value,date,month,year").order("id", { ascending: false })
     ]);
     setStudent(found);
     setContents((contentResult.data ?? []).map(fromDbContent));

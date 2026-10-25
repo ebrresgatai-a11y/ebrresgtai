@@ -52,6 +52,13 @@ export default async (req: Request, _context: Context) => {
       return jsonResponse({ rooms, settings: settingsRows[0]?.value ?? {}, students });
     }
 
+    if (audience === "studentFinance") {
+      const financialEntries = studentId
+        ? await sql`select id, type, title, category, value, date, month, year from financial_entries order by id desc`
+        : [];
+      return jsonResponse({ financialEntries: financialEntries.map(financialEntry) });
+    }
+
     if (audience === "student") {
       const [contents, libraryItems, ministryItems, settingsRows, questions, prayers, financialEntries] = await Promise.all([
         sql`select * from student_portal_contents where active = true and room in ('Geral', ${room}) order by published_at desc`,
@@ -60,7 +67,7 @@ export default async (req: Request, _context: Context) => {
         sql`select value from app_settings where key = 'general' limit 1`,
         studentId ? sql`select * from student_questions where student_id = ${studentId} order by created_at desc limit 60` : Promise.resolve([]),
         studentId ? sql`select * from student_prayer_requests where student_id = ${studentId} order by created_at desc limit 60` : Promise.resolve([]),
-        studentId ? sql`select id, type, title, category, value, date, month, year from financial_entries order by date desc, id desc limit 240` : Promise.resolve([])
+        studentId ? sql`select id, type, title, category, value, date, month, year from financial_entries order by id desc` : Promise.resolve([])
       ]);
       return jsonResponse({ contents: contents.map(content), libraryItems: libraryItems.map(library), ministryItems: ministryItems.map(ministry), settings: settingsRows[0]?.value ?? {}, questions: questions.map(interaction), prayers: prayers.map(interaction), financialEntries: financialEntries.map(financialEntry) });
     }

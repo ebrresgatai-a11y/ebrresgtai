@@ -84,6 +84,17 @@ type PaymentTarget = {
   itemId?: number;
 };
 
+type FinancialEntry = {
+  id: number;
+  type: "entrada" | "saida";
+  title: string;
+  category: string;
+  value: number;
+  date: string;
+  month: number;
+  year: number;
+};
+
 async function neonMutate<T>(entity: string, action: string, payload?: unknown, id?: number) {
   const result = await fetchNeonJson<{ ok: boolean; data: T }>("/api/neon/mutate", {
     method: "POST",
@@ -264,6 +275,23 @@ function fromDbMinistry(row: any): MinistryItem {
   };
 }
 
+function fromDbFinancialEntry(row: any): FinancialEntry {
+  return {
+    id: Number(row.id),
+    type: row.type === "entrada" ? "entrada" : "saida",
+    title: row.title ?? "",
+    category: row.category ?? "sem categoria",
+    value: Number(row.value ?? 0),
+    date: row.date ?? "",
+    month: Number(row.month ?? 0),
+    year: Number(row.year ?? 0)
+  };
+}
+
+function formatStudentMoney(value: number) {
+  return value.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function fromDbInteraction(row: any): StudentInteraction {
   return {
     id: Number(row.id),
@@ -377,6 +405,104 @@ function InteractionHistory({ title, items, emptyText }: { title: string; items:
   );
 }
 
+function StudentFinanceSection({ entries }: { entries: FinancialEntry[] }) {
+  const summary = useMemo(() => {
+    const totalEntradas = entries.filter((entry) => entry.type === "entrada").reduce((sum, entry) => sum + entry.value, 0);
+    const totalSaidas = entries.filter((entry) => entry.type === "saida").reduce((sum, entry) => sum + entry.value, 0);
+    const categories = (type: FinancialEntry["type"], total: number) => {
+      const grouped = entries
+        .filter((entry) => entry.type === type)
+        .reduce<Record<string, { value: number; count: number }>>((result, entry) => {
+          const name = entry.category.trim() || "sem categoria";
+          const current = result[name] ?? { value: 0, count: 0 };
+          result[name] = { value: current.value + entry.value, count: current.count + 1 };
+          return result;
+        }, {});
+      return Object.entries(grouped)
+        .map(([name, item]) => ({ name, ...item, percentage: total ? (item.value / total) * 100 : 0 }))
+        .sort((a, b) => b.value - a.value);
+    };
+    return {
+      totalEntradas,
+      totalSaidas,
+      saldo: totalEntradas - totalSaidas,
+      entradaCategorias: categories("entrada", totalEntradas),
+      saidaCategorias: categories("saida", totalSaidas)
+    };
+  }, [entries]);
+
+  const panels = [
+    { title: "Entradas por categoria", items: summary.entradaCategorias, color: "bg-brand-green", valueColor: "text-brand-green", empty: "Nenhuma entrada registrada." },
+    { title: "Saídas por categoria", items: summary.saidaCategorias, color: "bg-brand-red", valueColor: "text-brand-red", empty: "Nenhuma saída registrada." }
+  ];
+
+  return (
+    <section className="rounded-[1.25rem] bg-white p-3 shadow-soft dark:bg-slate-950 sm:rounded-[1.6rem] sm:p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-brand-blue">Transparência EBR</p>
+          <h2 className="mt-1 text-lg font-extrabold text-brand-deep dark:text-white">Caixa da EBR</h2>
+          <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">Visualização dos lançamentos financeiros. Esta área é somente para consulta.</p>
+        </div>
+        <DollarSign className="h-5 w-5 shrink-0 text-brand-blue" />
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <div className="rounded-2xl bg-emerald-50 p-3 dark:bg-emerald-500/10">
+          <p className="text-[0.68rem] font-extrabold uppercase text-emerald-700 dark:text-emerald-200">Entradas</p>
+          <p className="mt-1 text-base font-extrabold text-brand-green">R$ {formatStudentMoney(summary.totalEntradas)}</p>
+        </div>
+        <div className="rounded-2xl bg-rose-50 p-3 dark:bg-rose-500/10">
+          <p className="text-[0.68rem] font-extrabold uppercase text-rose-700 dark:text-rose-200">Saídas</p>
+          <p className="mt-1 text-base font-extrabold text-brand-red">R$ {formatStudentMoney(summary.totalSaidas)}</p>
+        </div>
+        <div className="rounded-2xl bg-blue-50 p-3 dark:bg-blue-500/10">
+          <p className="text-[0.68rem] font-extrabold uppercase text-brand-blue">Saldo</p>
+          <p className={`mt-1 text-base font-extrabold ${summary.saldo >= 0 ? "text-brand-blue" : "text-brand-red"}`}>R$ {formatStudentMoney(summary.saldo)}</p>
+        </div>
+      </div>
+      {entries.length ? (
+        <>
+          <div className="mt-4 grid gap-3 lg:grid-cols-2">
+            {panels.map((panel) => (
+              <div key={panel.title} className="rounded-2xl bg-slate-50 p-3 dark:bg-slate-900">
+                <h3 className="text-sm font-extrabold text-brand-deep dark:text-white">{panel.title}</h3>
+                <div className="mt-3 space-y-3">
+                  {panel.items.length ? panel.items.map((item) => (
+                    <div key={item.name}>
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="min-w-0 truncate font-extrabold capitalize text-slate-700 dark:text-slate-200">{item.name}</span>
+                        <span className={`shrink-0 font-extrabold ${panel.valueColor}`}>R$ {formatStudentMoney(item.value)}</span>
+                      </div>
+                      <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+                        <div className={`h-full rounded-full ${panel.color}`} style={{ width: `${Math.max(item.percentage, 2)}%` }} />
+                      </div>
+                      <p className="mt-1 text-[0.65rem] font-semibold text-slate-500 dark:text-slate-400">{Math.round(item.percentage)}% • {item.count} {item.count === 1 ? "lançamento" : "lançamentos"}</p>
+                    </div>
+                  )) : <p className="text-xs font-semibold text-slate-500 dark:text-slate-400">{panel.empty}</p>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-4">
+            <h3 className="text-sm font-extrabold text-brand-deep dark:text-white">Lançamentos recentes</h3>
+            <div className="mt-2 space-y-2">
+              {entries.slice(0, 6).map((entry) => (
+                <div key={entry.id} className="flex items-center justify-between gap-3 rounded-2xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-extrabold text-slate-700 dark:text-slate-200">{entry.title}</p>
+                    <p className="mt-0.5 text-[0.68rem] capitalize text-slate-500 dark:text-slate-400">{entry.category}{entry.date ? ` • ${new Date(entry.date + "T00:00:00").toLocaleDateString("pt-BR")}` : ""}</p>
+                  </div>
+                  <p className={`shrink-0 text-xs font-extrabold ${entry.type === "entrada" ? "text-brand-green" : "text-brand-red"}`}>{entry.type === "entrada" ? "+" : "-"} R$ {formatStudentMoney(entry.value)}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : <p className="mt-4 rounded-2xl bg-slate-50 p-3 text-xs font-bold text-slate-500 dark:bg-slate-900 dark:text-slate-400">Nenhum lançamento financeiro disponível para visualização.</p>}
+    </section>
+  );
+}
+
 export default function StudentPortalPage() {
   const [query, setQuery] = useState("");
   const [student, setStudent] = useState<Student | null>(null);
@@ -401,7 +527,8 @@ export default function StudentPortalPage() {
   const [profileSaving, setProfileSaving] = useState(false);
   const [profileFeedback, setProfileFeedback] = useState("");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [mobileSection, setMobileSection] = useState<"contents" | "library" | "talk" | "ministry">("contents");
+  const [mobileSection, setMobileSection] = useState<"contents" | "library" | "talk" | "ministry" | "finance">("contents");
+  const [financialEntries, setFinancialEntries] = useState<FinancialEntry[]>([]);
   const [notifications, setNotifications] = useState<InternalNotification[]>([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [pushFeedback, setPushFeedback] = useState("");
@@ -424,7 +551,7 @@ export default function StudentPortalPage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const section = new URLSearchParams(window.location.search).get("section");
-    if (section === "contents" || section === "library" || section === "talk" || section === "ministry") setMobileSection(section);
+    if (section === "contents" || section === "library" || section === "talk" || section === "ministry" || section === "finance") setMobileSection(section);
     void registerEbrServiceWorker().catch(() => undefined);
   }, []);
 
@@ -497,7 +624,7 @@ export default function StudentPortalPage() {
   function destinationSection(link: string) {
     try {
       const section = new URL(link, window.location.origin).searchParams.get("section");
-      return section === "contents" || section === "library" || section === "talk" || section === "ministry" ? section : "contents";
+      return section === "contents" || section === "library" || section === "talk" || section === "ministry" || section === "finance" ? section : "contents";
     } catch {
       return "contents";
     }
@@ -543,27 +670,30 @@ export default function StudentPortalPage() {
 
   async function loadPortalForStudent(found: Student) {
     if (isNeonProvider) {
-      const data = await fetchNeonJson<{ contents: PortalContent[]; libraryItems: LibraryItem[]; ministryItems: MinistryItem[]; settings: Record<string, string>; questions: StudentInteraction[]; prayers: StudentInteraction[] }>("/api/neon/portal?" + new URLSearchParams({ audience: "student", studentId: String(found.id), room: found.room }).toString());
+      const data = await fetchNeonJson<{ contents: PortalContent[]; libraryItems: LibraryItem[]; ministryItems: MinistryItem[]; settings: Record<string, string>; questions: StudentInteraction[]; prayers: StudentInteraction[]; financialEntries: FinancialEntry[] }>("/api/neon/portal?" + new URLSearchParams({ audience: "student", studentId: String(found.id), room: found.room }).toString());
       setStudent(found);
       setContents(data.contents ?? []);
       setLibraryItems(data.libraryItems ?? []);
       setMinistryItems(data.ministryItems ?? []);
+      setFinancialEntries(data.financialEntries ?? []);
       setSettings(data.settings ?? {});
       setQuestions((data.questions ?? []).filter(isRecentInteraction));
       setPrayers((data.prayers ?? []).filter(isRecentInteraction));
       return;
     }
     if (!supabase) return;
-    const [contentResult, libraryResult, ministryResult, settingsResult] = await Promise.all([
+    const [contentResult, libraryResult, ministryResult, settingsResult, financialResult] = await Promise.all([
       supabase.from("student_portal_contents").select("*").eq("active", true).in("room", ["Geral", found.room]).order("published_at", { ascending: false }),
       supabase.from("student_library_items").select("id,title,description,price,image_url,payment_url,stock_quantity,active").eq("active", true).order("created_at", { ascending: false }),
       supabase.from("student_ministry_items").select("id,title,description,price,payment_key,image_url,active").eq("active", true).order("created_at", { ascending: false }),
-      supabase.from("app_settings").select("*").eq("key", "general").maybeSingle()
+      supabase.from("app_settings").select("*").eq("key", "general").maybeSingle(),
+      supabase.from("financial_entries").select("id,type,title,category,value,date,month,year").order("date", { ascending: false }).order("id", { ascending: false }).limit(240)
     ]);
     setStudent(found);
     setContents((contentResult.data ?? []).map(fromDbContent));
     setLibraryItems((libraryResult.data ?? []).map(fromDbLibrary));
     setMinistryItems((ministryResult.data ?? []).map(fromDbMinistry));
+    setFinancialEntries((financialResult.data ?? []).map(fromDbFinancialEntry));
     setSettings((settingsResult.data?.value as Record<string, string> | null) ?? {});
     await loadStudentInteractions(found);
   }
@@ -935,7 +1065,8 @@ export default function StudentPortalPage() {
     { key: "contents", label: "Conteúdos", count: visibleContents.length },
     { key: "library", label: "Livraria", count: libraryItems.length },
     { key: "talk", label: "Perguntas", count: questions.length + prayers.length },
-    { key: "ministry", label: "Lista", count: visibleMinistryItems.length }
+    { key: "ministry", label: "Lista", count: visibleMinistryItems.length },
+    { key: "finance", label: "Caixa", count: financialEntries.length }
   ] as const;
 
   const videos = visibleContents.filter((item) => item.type === "video");
@@ -1063,7 +1194,7 @@ export default function StudentPortalPage() {
         {feedback ? <p className="rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">{feedback}</p> : null}
 
         <div className="space-y-3 lg:hidden">
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-5 gap-2">
             {mobileSectionButtons.map((button) => (
               <button
                 key={button.key}
@@ -1133,6 +1264,8 @@ export default function StudentPortalPage() {
               </div>
             </section>
           ) : null}
+
+          {mobileSection === "finance" ? <StudentFinanceSection entries={financialEntries} /> : null}
 
           {mobileSection === "ministry" ? (
             <section className="max-h-[calc(100dvh-10.75rem)] overflow-y-auto rounded-[1.25rem] bg-brand-deep p-3 text-white shadow-soft">
@@ -1242,6 +1375,9 @@ export default function StudentPortalPage() {
               {selectedMinistryItems.length ? <div className="mt-4 rounded-2xl bg-white p-4 text-brand-deep shadow-sm"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-extrabold">{selectedMinistryItems.length} produto(s) selecionado(s)</p><p className="mt-1 text-base font-extrabold text-brand-green">Total: R$ {selectedMinistryTotal.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p></div><p className="text-right text-xs font-bold text-slate-500">Escolha a forma de pagamento para todos os itens.</p></div><div className="mt-3 grid grid-cols-3 gap-2"><button type="button" onClick={() => void handleMinistryPayment("pix")} className="rounded-full bg-brand-green px-3 py-2 text-xs font-extrabold text-white">Pix</button><button type="button" onClick={() => void handleMinistryPayment("cash")} className="rounded-full bg-brand-deep px-3 py-2 text-xs font-extrabold text-white">Dinheiro</button><button type="button" onClick={() => void handleMinistryPayment("take")} className="rounded-full bg-slate-100 px-3 py-2 text-xs font-extrabold text-slate-700">Levar</button></div></div> : <p className="mt-4 text-center text-xs font-bold text-blue-100">Adicione um ou mais produtos para escolher o pagamento.</p>}
             </div>
           </section>
+        </div>
+        <div className="hidden lg:block">
+          <StudentFinanceSection entries={financialEntries} />
         </div>
         {paymentTarget ? (
           <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/45 p-4 backdrop-blur-sm">

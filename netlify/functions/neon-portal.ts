@@ -11,6 +11,9 @@ function library(row: any) {
 function ministry(row: any) {
   return { id: Number(row.id), title: row.title ?? "", description: row.description ?? "", price: Number(row.price ?? 0), paymentKey: row.payment_key ?? "", imageUrl: row.image_url ?? "", active: Boolean(row.active), createdAt: row.created_at ?? "" };
 }
+function financialEntry(row: any) {
+  return { id: Number(row.id), type: row.type === "entrada" ? "entrada" : "saida", title: row.title ?? "", category: row.category ?? "sem categoria", value: Number(row.value ?? 0), date: dateOnly(row.date), month: Number(row.month ?? 0), year: Number(row.year ?? 0) };
+}
 function dateOnly(value: unknown) {
   if (!value) return "";
   if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -50,15 +53,16 @@ export default async (req: Request, _context: Context) => {
     }
 
     if (audience === "student") {
-      const [contents, libraryItems, ministryItems, settingsRows, questions, prayers] = await Promise.all([
+      const [contents, libraryItems, ministryItems, settingsRows, questions, prayers, financialEntries] = await Promise.all([
         sql`select * from student_portal_contents where active = true and room in ('Geral', ${room}) order by published_at desc`,
         sql`select * from student_library_items where active = true order by created_at desc`,
         sql`select * from student_ministry_items where active = true order by created_at desc`,
         sql`select value from app_settings where key = 'general' limit 1`,
         studentId ? sql`select * from student_questions where student_id = ${studentId} order by created_at desc limit 60` : Promise.resolve([]),
-        studentId ? sql`select * from student_prayer_requests where student_id = ${studentId} order by created_at desc limit 60` : Promise.resolve([])
+        studentId ? sql`select * from student_prayer_requests where student_id = ${studentId} order by created_at desc limit 60` : Promise.resolve([]),
+        studentId ? sql`select id, type, title, category, value, date, month, year from financial_entries order by date desc, id desc limit 240` : Promise.resolve([])
       ]);
-      return jsonResponse({ contents: contents.map(content), libraryItems: libraryItems.map(library), ministryItems: ministryItems.map(ministry), settings: settingsRows[0]?.value ?? {}, questions: questions.map(interaction), prayers: prayers.map(interaction) });
+      return jsonResponse({ contents: contents.map(content), libraryItems: libraryItems.map(library), ministryItems: ministryItems.map(ministry), settings: settingsRows[0]?.value ?? {}, questions: questions.map(interaction), prayers: prayers.map(interaction), financialEntries: financialEntries.map(financialEntry) });
     }
 
     if (audience === "studentLookup") {

@@ -3989,7 +3989,7 @@ function FinanceView({
   const [financeFeedback, setFinanceFeedback] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [entryType, setEntryType] = useState<FinancialEntry["type"]>("entrada");
   const [entryMode, setEntryMode] = useState<"standard" | "installments">("standard");
-  const [selectedMonth, setSelectedMonth] = useState<string>(String(getCurrentMonth()));
+  const [selectedMonth, setSelectedMonth] = useState<string>("todos");
   const [selectedDay, setSelectedDay] = useState<string>("todos");
   const [selectedYear, setSelectedYear] = useState(getCurrentYear());
   const [selectedFinanceCategory, setSelectedFinanceCategory] = useState<{ type: FinancialEntry["type"]; name: string } | null>(null);
